@@ -9,6 +9,8 @@ import { isAllowedGitHubUrl } from "./externalLinks.js";
 import { receiverAnalysisFromMetadata, receiverPrecisionMessage, type ReceiverAnalysisPresentation } from "./receiverPresentation.js";
 import { graphView, relationshipRank, type GraphDepth, type GraphView } from "./graphView.js";
 import { clampRelationshipRailWidth, relationshipRailWidthFromKey } from "./panelResize.js";
+import type { ExplorerDetails, CompatibilityResult } from "../exploration.js";
+import type { MethodImpactResult } from "../method-impact.js";
 
 type VscodeApi = { postMessage(message: unknown): void; getState(): unknown; setState(value: unknown): void };
 declare global { interface Window { acquireVsCodeApi?: () => VscodeApi; __TRACE_FIXTURE__?: ExtensionOutboundMessage; __TRACE_INITIAL_SELECTION__?: string } }
@@ -54,6 +56,10 @@ let themeRefreshFrame: number | undefined;
 let graphResizeFrame: number | undefined;
 let iconFontRefreshed = false;
 let renderedLayoutKey: string | undefined;
+const graphTrail: Array<{ graph: GraphResponse; selectedId?: string; depth: GraphDepth }> = [];
+const explorerDetails = new Map<string, ExplorerDetails>();
+let methodImpact: MethodImpactResult | undefined;
+let impactItemId: string | undefined;
 
 void document.fonts.ready.then(() => {
   if (!graph || iconFontRefreshed) return;
@@ -184,6 +190,15 @@ $("toggle-relationships").addEventListener("click", () => togglePanel("rail-open
 $("toggle-details").addEventListener("click", () => togglePanel("inspector-open", "toggle-details"));
 $("close-relationships").addEventListener("click", () => closePanel("rail-open", "toggle-relationships"));
 $("close-details").addEventListener("click", () => closePanel("inspector-open", "toggle-details"));
+$("open-method-impact").addEventListener("click", () => openMethodImpact());
+$("close-method-impact").addEventListener("click", () => { $("method-impact-panel").hidden = true; $("open-method-impact").setAttribute("aria-expanded", "false"); });
+$("method-impact-form").addEventListener("submit", (event) => {
+  event.preventDefault();
+  if (!graph || !impactItemId) return;
+  const value = (id: string) => $<HTMLInputElement>(id).value.trim();
+  $("method-impact-result").textContent = "Resolving exact parent declarations; consumer findings will appear as they become available…";
+  vscode.postMessage({ type: "methodImpact", itemId: impactItemId, methodName: value("impact-method"), ...(value("impact-target") ? { targetRef: value("impact-target") } : {}), ...(value("impact-signature") ? { localSignature: value("impact-signature") } : {}), ...(value("impact-php") ? { phpVersion: value("impact-php") } : {}), workingTree: $<HTMLInputElement>("impact-working-tree").checked, includeHistory: $<HTMLInputElement>("impact-history").checked });
+});
 $("toggle-history").addEventListener("click", () => {
   const panel = $("history-panel");
   const expanded = panel.classList.toggle("expanded");
@@ -210,19 +225,50 @@ function handleMessage(raw: unknown): void {
   const parsed = ExtensionOutboundMessageSchema.safeParse(raw);
   if (!parsed.success) return;
   const message = parsed.data;
+  if (message.type === "methodImpact") {
+    if (methodImpact?.analysisId !== message.result.analysisId && graph) { graphTrail.push({ graph, ...(selectedId ? { selectedId } : {}), depth: graphDepth }); selectedId = message.result.graph.focusNodeId; graphDepth = "focused"; impactItemId = message.result.itemId; $("method-impact-panel").hidden = false; $("open-method-impact").setAttribute("aria-expanded", "true"); $<HTMLInputElement>("impact-method").value = message.result.methodName; }
+    methodImpact = message.result; normalGraph = message.result.graph;
+    render(message.result.graph); renderMethodImpact(message.result);
+  }
   if (message.type === "graph") {
+    if (message.exploration && graph) {
+      graphTrail.push({ graph, ...(selectedId ? { selectedId } : {}), depth: graphDepth });
+      selectedId = message.graph.focusNodeId;
+      graphDepth = "focused";
+      navigation.length = 0;
+    }
     normalGraph = message.graph;
     render(message.graph);
   }
+  if (message.type === "details" && message.details.itemId === selectedId && message.details.queryId === graph?.queryId) renderExplorerDetails(message.details);
+  if (message.type === "compatibility" && message.result.itemId === selectedId && message.queryId === graph?.queryId) renderCompatibility(message.result);
   if (message.type === "context") {
+    methodImpact = undefined; impactItemId = undefined; $("method-impact-panel").hidden = true;
+    graphTrail.length = 0;
+    navigation.length = 0;
     const label = `${message.relativePath}:${message.line}`;
     $("context-symbol").textContent = label;
     $("context-symbol").title = label;
   }
   if (message.type === "loading") showCanvasState(message.message, "loading");
+  if (message.type === "progress") {
+    let progress = document.getElementById("graph-progress");
+    if (!progress) {
+      progress = document.createElement("span");
+      progress.id = "graph-progress";
+      progress.setAttribute("role", "status");
+      document.querySelector('[aria-label="Graph structure controls"]')?.append(progress);
+    }
+    progress.textContent = message.message ?? "";
+    progress.hidden = !message.message;
+  }
   if (message.type === "error") {
     const detail = message.detail ? `${message.message} ${message.detail}` : message.message;
     if (message.trace) showCanvasState(detail, "error");
+    for (const id of ["compatibility-results", "item-history-status", "exploration-details"]) {
+      const pending = document.getElementById(id);
+      if (pending && /^(Reconstructing installed|Analyzing this declaration|Loading relationships|Loading evidence)/.test(pending.textContent?.trim() ?? "")) pending.textContent = detail;
+    }
     showToast(detail, true);
   }
   if (message.type === "inclusion") renderInclusion(message.eventId, message.result);
@@ -367,7 +413,7 @@ function renderGraph(
   const layoutChanged = nextLayoutKey !== renderedLayoutKey;
   cy?.destroy();
   const elements = [
-    ...visibleGraph.nodes.map((node) => ({ data: { id: node.id, label: `${kindGlyph(node.kind)}  ${graphLabel(node.label)}${node.subtitle ? `\n${node.subtitle}` : ""}`, fullLabel: node.label, subtitle: node.subtitle ?? "", kind: node.kind, focused: Boolean(node.focused || node.id === graph?.focusNodeId), changeState: currentComparisonView?.nodeStates.get(node.id) ?? "" } })),
+    ...visibleGraph.nodes.map((node) => ({ data: { id: node.id, label: `${kindGlyph(node.kind)}  ${graphLabel(node.label, node.kind)}${graphSubtitle(node, graph?.focusNodeId)}`, fullLabel: node.label, subtitle: node.subtitle ?? "", kind: node.kind, focused: Boolean(node.focused || node.id === graph?.focusNodeId), changeState: currentComparisonView?.nodeStates.get(node.id) ?? "" } })),
     ...visibleGraph.edges.map((edge) => {
       const changeState = currentComparisonView?.edgeStates.get(edge.id);
       return { data: { id: edge.id, source: edge.source, target: edge.target, label: `${edge.label}${changeState ? ` · ${humanize(changeState)}` : ""}`, type: edge.type, confidence: edge.confidence, changeState: changeState ?? "" } };
@@ -414,6 +460,9 @@ function renderGraph(
       { selector: "edge[confidence = 'dependency-only']", style: { "line-style": "dotted", "line-color": violet, "target-arrow-color": violet } },
       { selector: "edge[confidence = 'unresolved']", style: { "line-style": "dashed", "line-color": unresolved, "target-arrow-color": unresolved, opacity: 0.62 } },
       { selector: "edge[type = 'overrides'], edge[type = 'calls-parent']", style: { "line-color": blue, "target-arrow-color": blue, width: 2.2 } },
+      { selector: "edge[type = 'signature-incompatible']", style: { "line-color": pink, "target-arrow-color": pink, width: 3 } },
+      { selector: "edge[type = 'signature-compatible']", style: { "line-color": green, "target-arrow-color": green } },
+      { selector: "edge[type = 'signature-unknown']", style: { "line-color": amber, "target-arrow-color": amber, "line-style": "dashed" } },
       { selector: "node[changeState = 'added']", style: { "border-color": green, "border-width": 3 } },
       { selector: "node[changeState = 'removed']", style: { "border-color": themeColor("--red", "#f14c4c"), "border-width": 3, opacity: 0.82 } },
       { selector: "node[changeState = 'changed']", style: { "border-color": amber, "border-width": 3 } },
@@ -427,6 +476,11 @@ function renderGraph(
     ],
   });
   const positions = layeredGraphPositions(visibleGraph.nodes, visibleGraph.edges, graph.focusNodeId);
+  if (graphDepth === "focused" && graph.nodes.find((node) => node.id === graph?.focusNodeId)?.metadata.methodImpact) {
+    const contracts = visibleGraph.nodes.filter((node) => node.kind !== "project" && node.metadata.impactOverview);
+    const consumers = visibleGraph.nodes.filter((node) => !contracts.some((contract) => contract.id === node.id));
+    for (const [row, items] of [contracts, consumers].entries()) items.forEach((node, index) => positions.set(node.id, { x: (index - (items.length - 1) / 2) * 270, y: row * 190, rank: row }));
+  }
   cy.nodes().forEach((node) => {
     const position = positions.get(node.id());
     if (position) node.position({ x: position.x, y: position.y });
@@ -439,7 +493,6 @@ function renderGraph(
   }
   renderedLayoutKey = nextLayoutKey;
   cy.on("tap", "node, edge", (event: EventObject) => selectElement(event.target.id(), true));
-  cy.on("dbltap", "node", (event: EventObject) => { if (!temporalComparison) vscode.postMessage({ type: "expand", nodeId: event.target.id(), direction: "both" }); });
   cy.on("tap", (event: EventObject) => { if (event.target === cy) clearSelection(); });
   cy.on("pan zoom position", renderMinimap);
   if (selectedId) cy.getElementById(selectedId).select();
@@ -587,8 +640,8 @@ function renderTree(): void {
       const otherId = edge.source === graph.focusNodeId ? edge.target : edge.source;
       const node = graph.nodes.find((candidate) => candidate.id === otherId);
       const button = document.createElement("button");
-      button.className = `tree-item${selectedId === edge.id ? " selected" : ""}`;
-      button.dataset.id = edge.id;
+      button.className = `tree-item${selectedId === otherId ? " selected" : ""}`;
+      button.dataset.id = otherId;
       button.dataset.type = type;
       button.dataset.index = String(edgeIndex);
       button.dataset.confidence = edge.confidence;
@@ -596,8 +649,15 @@ function renderTree(): void {
       const changeState = currentComparisonView?.edgeStates.get(edge.id);
       button.setAttribute("aria-label", `${node?.label ?? edge.label}, ${changeState ? `${humanize(changeState)} relationship` : `${humanize(edge.confidence)} confidence`}`);
       button.innerHTML = `${icon(kindIcon(node?.kind ?? "method"), `type-icon ${node?.kind ?? "method"}`)}<span>${escapeHtml(node?.label ?? edge.label)}</span>${changeState ? `<em class="change-label ${changeState}">${escapeHtml(humanize(changeState))}</em>` : `<em class="confidence-mini ${edge.confidence}" title="${escapeHtml(edge.confidence)}"></em>`}`;
-      button.addEventListener("click", () => selectElement(edge.id, true));
-      list.append(button);
+      button.addEventListener("click", () => selectElement(node?.id ?? edge.id, true));
+      const row = document.createElement("div"); row.className = "tree-row";
+      const evidence = document.createElement("button"); evidence.className = "tree-evidence";
+      evidence.setAttribute("aria-label", `Inspect connection: ${edge.label} ${node?.label ?? ""}`);
+      evidence.title = "Explain connection and source evidence";
+      evidence.innerHTML = icon("link");
+      evidence.addEventListener("click", () => selectElement(edge.id, true));
+      row.append(button, evidence);
+      list.append(row);
     }
     const more = document.createElement("button");
     more.className = "tree-more";
@@ -630,12 +690,20 @@ function selectElement(id: string, addHistory: boolean): void {
   const edge = graph.edges.find((candidate) => candidate.id === id);
   if (node) renderNodeDetails(node);
   if (edge) renderEdgeDetails(edge);
+  if (addHistory && (node || edge)) {
+    if (window.innerWidth < 920) document.body.classList.remove("rail-open");
+    document.body.classList.add("inspector-open");
+    $("toggle-relationships").setAttribute("aria-expanded", "false");
+    $("toggle-details").setAttribute("aria-expanded", "true");
+  }
+  if (!temporalComparison && (node || edge)) vscode.postMessage({ type: "inspect", itemId: id });
   if (addHistory) {
     if (navigation.at(-1) !== id) navigation.push(id);
-    if (navigation.length > 8) navigation.shift();
+    if (navigation.length > 12) navigation.splice(1, 1);
     renderBreadcrumbs();
     persistViewState();
   }
+  if (addHistory && node && node.id !== graph.focusNodeId && !temporalComparison) vscode.postMessage({ type: "navigate", nodeId: id });
 }
 
 function clearSelection(): void {
@@ -668,7 +736,7 @@ function renderNodeDetails(node: GraphNode): void {
   $("detail-confidence").className = "confidence";
   $("detail-confidence").textContent = node.focused ? "Focus" : "Indexed";
   const occurrence = node.occurrence;
-  const reserved = new Set(["description", "documentationDetails", "signature", "parameters", "returnType", "contractSources", "lateStaticBindings", "parent", "interfaces", "traits", "receiverAnalysis", ...composerMetadataKeys]);
+  const reserved = new Set(["description", "documentationDetails", "signature", "parameters", "returnType", "contractSources", "lateStaticBindings", "parent", "interfaces", "traits", "receiverAnalysis", "indexedCandidateId", "repositoryId", "storyRole", "scopeLabel", "explored", ...composerMetadataKeys]);
   const metadata = Object.entries(node.metadata).filter(([key, value]) => !reserved.has(key) && (typeof value === "string" || typeof value === "number" || typeof value === "boolean"));
   const description = typeof node.metadata.description === "string" ? node.metadata.description : undefined;
   const documentationDetails = typeof node.metadata.documentationDetails === "string" ? node.metadata.documentationDetails : undefined;
@@ -695,16 +763,78 @@ function renderNodeDetails(node: GraphNode): void {
     ${temporalState ? `<section class="temporal-detail ${temporalState}"><h3>Temporal comparison</h3><dl><dt>State</dt><dd><strong>${escapeHtml(humanize(temporalState))}</strong></dd>${temporalFields.length ? `<dt>Changed fields</dt><dd>${temporalFields.map(escapeHtml).join(" · ")}</dd>` : ""}</dl></section>` : ""}
     ${description || documentationDetails ? `<section class="description-panel"><h3>Description</h3>${description ? `<p class="description-summary">${escapeHtml(description)}</p>` : ""}${documentationDetails ? `<p>${escapeHtml(documentationDetails)}</p>` : ""}</section>` : ""}
     ${signature || parameters.length || returnType ? `<section><h3>Type contract</h3>${signature ? `<pre class="signature"><code>${escapeHtml(signature)}</code></pre>` : ""}${parameters.length ? `<div class="contract-list"><h4>Parameters</h4>${parameters.map(renderParameter).join("")}</div>` : ""}${returnType ? `<div class="contract-list"><h4>Returns</h4>${renderTypeContract(returnType, "Return value")}</div>` : ""}</section>` : ""}
+    ${temporalComparison ? "" : '<div id="exploration-details" aria-live="polite"><p>Loading relationships and source links…</p></div>'}
     ${receiverAnalysis.length ? `<section class="receiver-analysis"><h3>${icon("inspect")} Receiver analysis</h3><div class="receiver-list">${receiverAnalysis.map(renderReceiverAnalysis).join("")}</div></section>` : ""}
     ${contractSources.length ? `<section><h3>Contract provenance</h3>${contractSources.map(renderContractSource).join("")}</section>` : ""}
     ${typeHierarchy.length ? `<section><h3>Type hierarchy</h3><dl>${typeHierarchy.map(([key, value]) => `<dt>${key}</dt><dd><code>${escapeHtml(value)}</code></dd>`).join("")}</dl></section>` : ""}
     ${bindings.length ? `<section><h3>Late static binding</h3>${bindings.map((binding) => `<article class="binding"><strong>${escapeHtml(humanize(typeof binding.kind === "string" ? binding.kind : "binding"))}</strong><p>${escapeHtml(typeof binding.detail === "string" ? binding.detail : "Resolved from static at runtime.")}</p>${isRecord(binding.range) && typeof binding.range.startLine === "number" ? `<small>Line ${binding.range.startLine}</small>` : ""}</article>`).join("")}<p class="limitation">The concrete target can be a subclass of the declaring class at runtime.</p></section>` : ""}
     ${composerResolution ? renderComposerResolution(composerResolution) : ""}
-    ${occurrence ? `<section><h3>Source</h3><dl><dt>Repository</dt><dd>${escapeHtml(occurrence.revision.repositoryId)}</dd><dt>Revision</dt><dd><code>${escapeHtml(occurrence.revision.commit.slice(0, 12))}</code>${occurrence.revision.dirty ? " · local overlay" : ""}</dd><dt>Path</dt><dd><code>${escapeHtml(occurrence.path)}:${occurrence.range.startLine}</code></dd></dl><button class="primary" id="open-node-source">Open source</button></section>` : ""}
+    ${occurrence ? `<section><h3>Source</h3><dl><dt>Repository</dt><dd>${escapeHtml(occurrence.revision.repositoryId)}</dd><dt>Revision</dt><dd><code>${escapeHtml(occurrence.revision.commit.slice(0, 12))}</code>${occurrence.revision.dirty ? " · unsaved local changes" : ""}</dd><dt>Path</dt><dd><code>${escapeHtml(occurrence.path)}:${occurrence.range.startLine}</code></dd></dl></section>` : ""}
     ${metadata.length ? `<section><h3>Metadata</h3><dl>${metadata.map(([key, value]) => `<dt>${escapeHtml(humanize(key))}</dt><dd>${escapeHtml(String(value))}</dd>`).join("")}</dl></section>` : ""}
-    ${temporalComparison ? "" : '<section><button id="expand-node">Expand relationships</button></section>'}`;
+    ${temporalComparison ? "" : '<section><button id="expand-node">Explore relationships</button></section>'}`;
   document.getElementById("open-node-source")?.addEventListener("click", () => vscode.postMessage({ type: "openSource", nodeId: node.id }));
-  document.getElementById("expand-node")?.addEventListener("click", () => vscode.postMessage({ type: "expand", nodeId: node.id, direction: "both" }));
+  document.getElementById("expand-node")?.addEventListener("click", () => vscode.postMessage({ type: "navigate", nodeId: node.id }));
+}
+
+function renderExplorerDetails(details: ExplorerDetails): void {
+  explorerDetails.set(details.itemId, details);
+  if (graph?.focusNodeId === details.itemId && details.history.length) { graph.history = details.history; renderTimeline(); }
+  const host = document.getElementById("exploration-details");
+  if (!host) return;
+  host.innerHTML = `
+    ${details.repositoryUrl && isAllowedGitHubUrl(details.repositoryUrl) ? `<section><h3>Repository</h3><button data-source-github="${escapeHtml(details.repositoryUrl)}">Open repository on GitHub</button></section>` : ""}
+    ${details.links.length ? `<section><h3>Source navigation</h3>${details.links.map((link) => `<article class="source-location"><strong>${escapeHtml(link.label)}</strong><p><code>${escapeHtml(link.repositoryId)} · ${escapeHtml(link.commit.slice(0, 12))}</code></p>${link.path ? `<p><code>${escapeHtml(link.path)}${link.range ? `:${link.range.startLine}–${link.range.endLine}` : ""}</code></p>` : ""}${link.githubUrl && isAllowedGitHubUrl(link.githubUrl) ? `<button data-source-github="${escapeHtml(link.githubUrl)}">Open on GitHub</button>` : ""}${link.vscodeUrl ? `<button data-source-location="${escapeHtml(link.vscodeUrl)}">Open in VS Code</button>` : ""}${link.unavailable ? `<p class="limitation">${escapeHtml(link.unavailable)}</p>` : ""}</article>`).join("")}</section>` : ""}
+    ${details.preview !== undefined ? `<section><h3>Source preview</h3><details><summary>Show indexed source preview</summary><pre class="source-preview"><code>${escapeHtml(details.preview)}</code></pre><small>Indexed declaration preview, up to 120 lines.</small></details></section>` : ""}
+    ${details.sections.map((section) => `<section><h3>${escapeHtml(section.title)}</h3>${section.text ? `<p>${escapeHtml(section.text)}</p>` : ""}<dl>${section.rows.map((row) => `<dt>${row.nodeId ? `<button data-related-node="${escapeHtml(row.nodeId)}">${escapeHtml(row.label)}</button>` : escapeHtml(row.label)}</dt><dd>${escapeHtml(row.value)}</dd>`).join("")}</dl></section>`).join("")}
+    ${details.history.length ? `<section><h3>Declaration events</h3><div id="selected-item-history"></div></section>` : ""}
+    ${details.kind === "method" || ["class", "interface", "trait"].includes(details.kind) ? '<section><button id="load-item-history">Analyze declaration history</button><p id="item-history-status" role="status"></p></section>' : ""}
+    ${details.kind !== "relationship" ? '<section><h3>Assess package update</h3><label for="package-target">Proposed package commit, branch, or release (optional)</label><input id="package-target" placeholder="For example: v5.60.0 or a commit" autocomplete="off"><button id="assess-contract">Assess current state / proposed update</button><div id="compatibility-results" aria-live="polite"></div></section>' : ""}
+    ${details.limitations.length ? `<section><h3>Limitations</h3>${details.limitations.map((item) => `<p>${escapeHtml(item)}</p>`).join("")}</section>` : ""}`;
+  host.querySelectorAll<HTMLButtonElement>("[data-source-github]").forEach((button) => button.addEventListener("click", () => { const url = button.dataset.sourceGithub; if (url && isAllowedGitHubUrl(url)) vscode.postMessage({ type: "openGitHub", url }); }));
+  host.querySelectorAll<HTMLButtonElement>("[data-source-location]").forEach((button) => button.addEventListener("click", () => vscode.postMessage({ type: "openLocation", url: button.dataset.sourceLocation })));
+  host.querySelectorAll<HTMLButtonElement>("[data-related-node]").forEach((button) => button.addEventListener("click", () => selectElement(button.dataset.relatedNode!, true)));
+  for (const event of details.history) document.getElementById("selected-item-history")?.append(historyButton(event));
+  document.getElementById("load-item-history")?.addEventListener("click", () => { $("item-history-status").textContent = "Analyzing this declaration’s Git history…"; vscode.postMessage({ type: "loadHistory", nodeId: details.itemId }); });
+  document.getElementById("assess-contract")?.addEventListener("click", () => { const targetRef = ($("package-target") as HTMLInputElement).value.trim(); openMethodImpact(details.itemId); $<HTMLInputElement>("impact-target").value = targetRef; });
+}
+
+function openMethodImpact(itemId?: string): void {
+  const node = graph?.nodes.find((item) => item.id === (itemId ?? selectedId)) ?? graph?.nodes.find((item) => item.id === graph?.focusNodeId);
+  if (!node?.occurrence) { impactItemId = undefined; $("method-impact-result").textContent = "Choose a source-backed class or method first."; }
+  else { impactItemId = node.id; $<HTMLInputElement>("impact-method").value = node.occurrence.logical.memberName ?? ""; }
+  $("method-impact-panel").hidden = false; $("open-method-impact").setAttribute("aria-expanded", "true");
+  $<HTMLInputElement>("impact-method").focus();
+}
+
+function renderMethodImpact(result: MethodImpactResult): void {
+  const host = $("method-impact-result");
+  const sourceLinks = (links: MethodImpactResult["origin"]["links"]) => links.map((link) => `${link.githubUrl && isAllowedGitHubUrl(link.githubUrl) ? `<button data-impact-github="${escapeHtml(link.githubUrl)}">GitHub · ${escapeHtml(link.label)}</button>` : ""}${link.vscodeUrl ? `<button data-impact-local="${escapeHtml(link.vscodeUrl)}">VS Code · ${escapeHtml(link.label)}</button>` : ""}${link.unavailable ? `<small>${escapeHtml(link.unavailable)}</small>` : ""}`).join("");
+  const groups = ["changes-required", "review-recommended", "no-signature-incompatibility", "insufficient-evidence"] as const;
+  host.innerHTML = `<div class="impact-contracts"><article><h3>Originating contract</h3><strong>${escapeHtml(result.packageName)}</strong><code>${escapeHtml(result.origin.signature)}</code><small>${escapeHtml(result.origin.commit)}</small>${sourceLinks(result.origin.links)}</article><article><h3>Proposed contract · ${escapeHtml(result.target.label)}</h3><code>${escapeHtml(result.target.signature ?? "Unavailable")}</code><small>${escapeHtml(result.target.kind === "local-preview" ? "Local unreleased preview" : result.target.commit ?? "No exact revision available")}</small>${sourceLinks(result.target.links)}${result.target.releases.length ? `<p>Containing releases: ${result.target.releases.map(escapeHtml).join(", ")}</p>` : ""}</article></div><p role="status">${result.complete ? "Analysis complete" : "Loading more consumers or history…"} · ${result.rows.length} findings</p><div id="impact-contract-history"></div>${groups.map((group) => { const rows = result.rows.filter((row) => row.group === group); return rows.length ? `<h3>${escapeHtml(humanize(group))} · ${rows.length}</h3><div class="impact-table-scroll"><table><thead><tr><th>Consumer / declaration</th><th>Installed package</th><th>Relationship</th><th>Current state</th><th>Proposed state</th><th>Evidence</th></tr></thead><tbody>${rows.map((row) => `<tr data-impact-row="${escapeHtml(row.id)}"><td><button data-impact-node="${escapeHtml(row.nodeId ?? "")}">${escapeHtml(row.consumer)}<br>${escapeHtml(row.className ?? "No indexed descendant")}</button><code>${escapeHtml(row.consumerSignature ?? row.effectiveImplementation ?? "No resolved method")}</code><small>PHP ${escapeHtml(row.phpVersion)} · ${escapeHtml(row.phpBasis)}</small></td><td>${escapeHtml(row.installedVersion)}<code>${escapeHtml(row.installedCommit)}</code></td><td>${escapeHtml(humanize(row.relationship))}${row.callsParent ? " · explicit parent call" : ""}<details><summary>Inheritance path</summary>${row.inheritancePath.map((item) => `<p><button data-impact-node="${escapeHtml(item.nodeId)}">${escapeHtml(item.name)}</button><small>${escapeHtml(item.commit.slice(0, 12))}</small></p>`).join("")}</details></td><td><strong>${escapeHtml(humanize(row.current.state))}</strong><code>${escapeHtml(row.currentSignature ?? "Unavailable")}</code>${row.current.reasons.map(escapeHtml).join("; ")}</td><td><strong>${escapeHtml(humanize(row.target.state))}</strong><code>${escapeHtml(row.targetSignature ?? "Unavailable")}</code>${row.target.reasons.map(escapeHtml).join("; ")}</td><td>${sourceLinks(row.links)}${row.history ? `<details><summary>Declaration history</summary><div data-impact-history="${escapeHtml(row.id)}"></div></details>` : ""}</td></tr>`).join("")}</tbody></table></div>` : ""; }).join("")}${result.limitations.map((item) => `<p class="limitation">${escapeHtml(item)}</p>`).join("")}`;
+  host.querySelectorAll<HTMLButtonElement>("[data-impact-node]").forEach((button) => button.addEventListener("click", () => { if (button.dataset.impactNode) { if (!graph?.nodes.some((node) => node.id === button.dataset.impactNode)) { if (graph) graphTrail.push({ graph, ...(selectedId ? { selectedId } : {}), depth: graphDepth }); normalGraph = result.graph; vscode.postMessage({ type: "restoreGraph", graph: result.graph }); render(result.graph); } selectElement(button.dataset.impactNode, false); document.body.classList.add("inspector-open"); } }));
+  host.querySelectorAll<HTMLButtonElement>("[data-impact-github]").forEach((button) => button.addEventListener("click", () => vscode.postMessage({ type: "openGitHub", url: button.dataset.impactGithub })));
+  host.querySelectorAll<HTMLButtonElement>("[data-impact-local]").forEach((button) => button.addEventListener("click", () => vscode.postMessage({ type: "openLocation", url: button.dataset.impactLocal })));
+  for (const history of [result.origin.history, result.target.history]) if (history) {
+    const heading = document.createElement("h3"); heading.textContent = history === result.origin.history ? "Parent declaration history" : "Proposed declaration history"; $("impact-contract-history").append(heading);
+    const summary = document.createElement("p"); summary.textContent = `Earliest verified introduction: ${history.introduction?.authoredAt ?? "Unavailable"} · Last signature change: ${history.signature?.authoredAt ?? "None verified"} · Last implementation change: ${history.implementation?.authoredAt ?? "None verified"}`; $("impact-contract-history").append(summary);
+    for (const event of history.events) $("impact-contract-history").append(historyButton(event));
+  }
+  for (const row of result.rows) {
+    let container = [...host.querySelectorAll<HTMLElement>("[data-impact-history]")].find((item) => item.dataset.impactHistory === row.id);
+    if (!container && row.relationshipHistory?.length) {
+      const cell = [...host.querySelectorAll<HTMLElement>("[data-impact-row]")].find((item) => item.dataset.impactRow === row.id)?.lastElementChild;
+      if (cell) { const details = document.createElement("details"); const heading = document.createElement("summary"); heading.textContent = "Inheritance history"; container = document.createElement("div"); details.append(heading, container); cell.append(details); }
+    }
+    if (container && row.history) { const summary = document.createElement("p"); summary.textContent = `Earliest verified introduction: ${row.history.introduction?.authoredAt ?? "Unavailable"} · Last signature change: ${row.history.signature?.authoredAt ?? "None verified"} · Last implementation change: ${row.history.implementation?.authoredAt ?? "None verified"}`; container.append(summary); }
+    for (const event of [...row.history?.events ?? [], ...row.relationshipHistory ?? []]) container?.append(historyButton(event));
+  }
+}
+
+function renderCompatibility(result: CompatibilityResult): void {
+  const host = document.getElementById("compatibility-results");
+  if (!host) return;
+  host.innerHTML = `${result.rows.map((row) => `<article class="source-location"><h4>${escapeHtml(row.consumer)} · ${escapeHtml(row.method)}</h4><dl><dt>Installed package</dt><dd>${escapeHtml(row.packageName)} ${escapeHtml(row.installedVersion)}<br><code>${escapeHtml(row.installedCommit)}</code></dd><dt>Consumer signature</dt><dd><code>${escapeHtml(row.childSignature)}</code></dd><dt>Installed parent</dt><dd><code>${escapeHtml(row.parentSignature ?? "Unavailable")}</code></dd><dt>Current compatibility</dt><dd><strong>${escapeHtml(humanize(row.current.state))}</strong><br>${row.current.reasons.map(escapeHtml).join(" · ")}</dd><dt>Proposed commit</dt><dd><code>${escapeHtml(row.targetCommit ?? "Not selected or unavailable")}</code></dd><dt>Proposed parent</dt><dd><code>${escapeHtml(row.targetSignature ?? "Unavailable")}</code></dd><dt>Target compatibility</dt><dd><strong>${escapeHtml(humanize(row.target.state))}</strong><br>${row.target.reasons.map(escapeHtml).join(" · ")}</dd></dl>${row.links.filter((link) => link.githubUrl && isAllowedGitHubUrl(link.githubUrl)).map((link) => `<button data-contract-source="${escapeHtml(link.githubUrl!)}">Open on GitHub · ${escapeHtml(link.label)}</button>`).join("")}</article>`).join("")}${result.limitations.map((item) => `<p class="limitation">${escapeHtml(item)}</p>`).join("")}`;
+  host.querySelectorAll<HTMLButtonElement>("[data-contract-source]").forEach((button) => button.addEventListener("click", () => vscode.postMessage({ type: "openGitHub", url: button.dataset.contractSource })));
 }
 
 function renderReceiverAnalysis(analysis: ReceiverAnalysisPresentation): string {
@@ -799,7 +929,7 @@ function renderEdgeDetails(edge: GraphEdge): void {
     <section class="detail-section"><h3>${detailSectionToggle("Source")}</h3><dl class="relationship-source"><dt>From</dt><dd>${icon(kindIcon(source?.kind ?? "method"), `type-icon ${source?.kind ?? "method"}`)}<code>${escapeHtml(source?.label ?? edge.source)}</code></dd><dt>To</dt><dd>${icon(kindIcon(target?.kind ?? "method"), `type-icon ${target?.kind ?? "method"}`)}<code>${escapeHtml(target?.label ?? edge.target)}</code></dd><dt>Type</dt><dd>${icon(relationshipIcon(edge.type), `relationship-icon ${edge.type}`)}${escapeHtml(humanize(edge.type))}</dd><dt>Confidence</dt><dd><i class="confidence-mini ${edge.confidence}"></i><strong class="confidence-text ${edge.confidence}">${escapeHtml(humanize(edge.confidence))}</strong></dd></dl></section>
     <section class="detail-section"><h3>${detailSectionToggle("Evidence")}</h3>${edge.evidence.map((evidence, index) => `<article class="evidence"><p>${escapeHtml(evidence.detail)}</p>${evidenceSignature ? `<div class="code-evidence">${evidenceLine ? `<span class="line-number">${evidenceLine}</span>` : ""}<pre><code>${escapeHtml(evidenceSignature)}</code></pre></div>` : ""}<dl><dt>Method</dt><dd>${escapeHtml(evidence.resolutionMethod)}</dd><dt>Revision</dt><dd><code>${escapeHtml(evidence.commit.slice(0, 12))}</code></dd>${evidence.path ? `<dt>Source</dt><dd><code>${escapeHtml(evidence.path)}${evidence.range ? `:${evidence.range.startLine}` : ""}</code></dd>` : ""}</dl>${evidence.limitations.length ? `<p class="limitation">${evidence.limitations.map(escapeHtml).join(" · ")}</p>` : ""}${evidence.path ? `<button data-evidence="${index}">${icon("go-to-file")}Open evidence</button>` : ""}</article>`).join("")}</section>
     ${sourceOccurrence ? `<section class="detail-section"><h3>${detailSectionToggle("Repository")}</h3><dl><dt>${icon("repo")}</dt><dd>${escapeHtml(sourceOccurrence.revision.repositoryId)}</dd><dt>${icon("source-control")}</dt><dd><code>${escapeHtml(sourceOccurrence.revision.commit.slice(0, 12))}</code>${sourceOccurrence.revision.dirty ? " · local overlay" : ""}</dd></dl><button class="primary" id="open-edge-source">${icon("go-to-file")}Open in VS Code</button></section>` : ""}
-    <section class="detail-section"><h3>${detailSectionToggle("Context")}</h3><dl><dt>Confidence</dt><dd><i class="confidence-mini ${edge.confidence}"></i>${escapeHtml(humanize(edge.confidence))}</dd><dt>Analysis scope</dt><dd>${graph?.freshness.partial ? "Local overlay" : "Indexed revision"}</dd><dt>Scope</dt><dd>${repositories} repositor${repositories === 1 ? "y" : "ies"}</dd>${graph?.freshness.limitations.length ? `<dt>Limitations</dt><dd>${graph.freshness.limitations.map(escapeHtml).join(" · ")}</dd>` : ""}</dl></section>`;
+    <section class="detail-section"><h3>${detailSectionToggle("Context")}</h3><dl><dt>Confidence</dt><dd><i class="confidence-mini ${edge.confidence}"></i>${escapeHtml(humanize(edge.confidence))}</dd><dt>Analysis scope</dt><dd>${graph?.nodes.some((node) => node.occurrence?.revision.dirty) ? "Local overlay" : "Indexed revision"}</dd><dt>Scope</dt><dd>${repositories} repositor${repositories === 1 ? "y" : "ies"}</dd>${graph?.freshness.limitations.length ? `<dt>Limitations</dt><dd>${graph.freshness.limitations.map(escapeHtml).join(" · ")}</dd>` : ""}</dl></section><div id="exploration-details" aria-live="polite"><p>Loading evidence source links…</p></div>`;
   wireDetailSections();
   document.querySelectorAll<HTMLButtonElement>("[data-evidence]").forEach((button) => button.addEventListener("click", () => vscode.postMessage({ type: "openEvidence", edgeId: edge.id, evidenceIndex: Number(button.dataset.evidence) })));
   document.getElementById("open-edge-source")?.addEventListener("click", () => vscode.postMessage({ type: "openSource", nodeId: source?.id ?? edge.source }));
@@ -845,6 +975,13 @@ function historyButton(event: HistoryEvent): HTMLButtonElement {
 }
 
 function renderHistoryDetails(event: HistoryEvent): void {
+  document.body.classList.add("inspector-open");
+  $("toggle-details").setAttribute("aria-expanded", "true");
+  if (event.category === "signature" && methodImpact) {
+    const affected = new Set(methodImpact.rows.filter((row) => row.target.state !== "no-signature-incompatibility").flatMap((row) => [row.nodeId, `project:${row.repositoryId}`]).filter(Boolean));
+    cy?.elements().addClass("dimmed"); cy?.nodes().filter((node) => affected.has(node.id()) || node.id() === methodImpact?.origin.nodeId).removeClass("dimmed").connectedEdges().removeClass("dimmed");
+    document.querySelectorAll<HTMLElement>("[data-impact-row]").forEach((item) => item.classList.toggle("impact-affected", methodImpact!.rows.some((row) => row.id === item.dataset.impactRow && row.target.state !== "no-signature-incompatibility")));
+  }
   selectedId = event.id;
   $("detail-kind").textContent = "History event";
   const confidence = event.lineage?.confidence;
@@ -864,12 +1001,18 @@ function renderHistoryDetails(event: HistoryEvent): void {
       ${renderEvidenceList(event.lineage.evidence)}
       ${event.lineage.limitations.length ? `<div class="assessment-limitations"><strong>Lineage limitations</strong><ul>${event.lineage.limitations.map((limitation) => `<li>${escapeHtml(limitation)}</li>`).join("")}</ul></div>` : ""}
     </section>` : "";
+  const historyDetails = explorerDetails.get(event.symbolId);
+  const eventNode = graph?.nodes.find((node) => node.id === event.symbolId);
+  const impactLinks = methodImpact ? [...methodImpact.origin.links, ...methodImpact.target.links, ...methodImpact.rows.flatMap((row) => row.links)] : [];
+  const impactSource = impactLinks.find((link) => link.repositoryId === eventNode?.occurrence?.revision.repositoryId && link.githubUrl)?.githubUrl;
+  const repositoryUrl = historyDetails?.repositoryUrl ?? impactSource?.split("/blob/")[0];
+  const historyUrl = repositoryUrl && /^[\da-f]{40}(?:[\da-f]{24})?$/i.test(event.commit) ? `${repositoryUrl}/commit/${event.commit}` : undefined;
   $("details").innerHTML = `
     <section><h3>${escapeHtml(event.summary)}</h3><p class="subtitle"><code>${escapeHtml(event.commit.slice(0, 12))}</code></p></section>
     <section><h3>Change</h3><dl><dt>Category</dt><dd>${escapeHtml(humanize(event.category))}</dd><dt>Author</dt><dd>${escapeHtml(event.authorName)}</dd><dt>Date</dt><dd>${escapeHtml(new Date(event.authoredAt).toLocaleString())}</dd></dl>${event.limitations.length ? `<p class="limitation">${event.limitations.map(escapeHtml).join(" · ")}</p>` : ""}</section>
     ${lineage}
-    <section><button class="primary" id="open-history-diff">Open before/after diff</button><button id="check-inclusion">Check releases, consumers and active behaviour</button><div id="history-inclusion" aria-live="polite"></div></section>`;
-  $("open-history-diff").addEventListener("click", () => vscode.postMessage({ type: "openHistory", eventId: event.id, side: "diff" }));
+    <section>${historyUrl ? '<button class="primary" id="open-history-github">Open on GitHub · commit and diff</button>' : '<p>Repository metadata is unavailable for this history event.</p>'}<button id="check-inclusion">Check releases, consumers and active behaviour</button><div id="history-inclusion" aria-live="polite"></div></section>`;
+  document.getElementById("open-history-github")?.addEventListener("click", () => { if (historyUrl && isAllowedGitHubUrl(historyUrl)) vscode.postMessage({ type: "openGitHub", url: historyUrl }); });
   $("check-inclusion").addEventListener("click", () => {
     $("history-inclusion").textContent = "Checking ancestry, equivalent patches and active behaviour…";
     vscode.postMessage({ type: "checkInclusion", eventId: event.id });
@@ -978,11 +1121,25 @@ function renderLegend(): void {
 }
 
 function renderBreadcrumbs(): void {
-  $("breadcrumbs").innerHTML = navigation.map((id, index) => {
+  const trail = graphTrail.map((frame, index) => `<button data-graph-back="${index}" title="Return to this graph">${index === 0 ? "Original trace: " : ""}${escapeHtml(frame.graph.nodes.find((node) => node.id === frame.graph.focusNodeId)?.label ?? "Trace")}</button>`).join('<span aria-hidden="true">›</span>');
+  $("breadcrumbs").innerHTML = `${graphTrail.length ? `<button id="graph-back" aria-label="Back to previous graph">← Back</button>${trail}<span aria-hidden="true">›</span>` : ""}` + navigation.map((id, index) => {
     const item = graph?.nodes.find((node) => node.id === id)?.label ?? graph?.edges.find((edge) => edge.id === id)?.label ?? id;
     return `${index ? '<span aria-hidden="true">›</span>' : ""}<button data-breadcrumb="${escapeHtml(id)}">${escapeHtml(item)}</button>`;
   }).join("");
   document.querySelectorAll<HTMLButtonElement>("[data-breadcrumb]").forEach((button) => button.addEventListener("click", () => selectElement(button.dataset.breadcrumb!, false)));
+  const restore = (index: number) => {
+    const frame = graphTrail[index];
+    if (!frame) return;
+    graphTrail.splice(index);
+    graphDepth = frame.depth;
+    selectedId = frame.selectedId;
+    navigation.length = 0;
+    normalGraph = frame.graph;
+    vscode.postMessage({ type: "restoreGraph", graph: frame.graph });
+    render(frame.graph);
+  };
+  document.getElementById("graph-back")?.addEventListener("click", () => restore(graphTrail.length - 1));
+  document.querySelectorAll<HTMLButtonElement>("[data-graph-back]").forEach((button) => button.addEventListener("click", () => restore(Number(button.dataset.graphBack))));
 }
 
 function applyFilters(): void {
@@ -1036,14 +1193,21 @@ function relationshipIcon(type: string): string {
   return ({ declares: "references", extends: "type-hierarchy", implements: "type-hierarchy", "implements-method": "type-hierarchy", inherits: "type-hierarchy", overrides: "arrow-right", calls: "call-outgoing", "calls-parent": "arrow-right", requires: "library", "uses-trait": "symbol-structure", "parameter-type": "symbol-parameter", "return-type": "symbol-method-arrow", "late-static-binding": "symbol-key", "changed-in": "git-commit", "included-in-release": "tag", "possible-lineage": "git-compare" } as Record<string, string>)[type] ?? "link";
 }
 
-function graphLabel(value: string): string {
+function graphLabel(value: string, kind: string): string {
   const separator = value.indexOf("::");
-  if (separator < 0) return value;
+  if (separator < 0) return ["class", "interface", "trait"].includes(kind) ? value.split("\\").at(-1) ?? value : value;
   const owner = value.slice(0, separator);
   const member = value.slice(separator + 2).replace(/\(\)$/, "");
-  const namespaceSeparator = owner.lastIndexOf("\\");
-  const ownerLines = namespaceSeparator > 0 ? `${owner.slice(0, namespaceSeparator)}\n${owner.slice(namespaceSeparator + 1)}` : owner;
-  return `${ownerLines}\n${member}`;
+  const shortOwner = owner.split("\\").at(-1) ?? owner;
+  return `${shortOwner}\n${member}`;
+}
+
+function graphSubtitle(node: GraphNode, focusNodeId?: string): string {
+  const scope = typeof node.metadata.scopeLabel === "string" ? `\n${node.metadata.scopeLabel}` : "";
+  if (node.metadata.impactRole) return `\n${humanize(String(node.metadata.impactRole))}${scope}\n${node.metadata.indexedBaseline ? "Indexed baseline" : node.occurrence?.revision.dirty ? "Local preview" : node.occurrence?.revision.commit.slice(0, 8) ?? ""}`;
+  if (node.id === focusNodeId) return `\nSelected ${node.kind.replace("-revision", "")}${scope}`;
+  if (node.metadata.storyRole || ["project", "package-revision"].includes(node.kind)) return node.subtitle ? `\n${node.subtitle}` : "";
+  return scope;
 }
 
 function escapeHtml(value: string): string {

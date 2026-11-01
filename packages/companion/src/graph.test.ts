@@ -6,6 +6,16 @@ import { TraceStore } from "./store.js";
 
 const range = { startLine: 1, startColumn: 0, endLine: 3, endColumn: 1 };
 
+test("a capped graph retains its selected symbol even when another declaration is ordered first", () => {
+  const store = new TraceStore(":memory:");
+  try {
+    const parent = typeSymbol("repo", "a".repeat(40), 0, "parent", "Example\\Parent");
+    const focus = typeSymbol("repo", "a".repeat(40), 0, "focus", "Example\\Focus", parent.fqn);
+    const graph = new GraphService(store).traceSnapshot({ repositoryPath: "/repo", relativePath: focus.path, revision: { repositoryId: "repo", commit: focus.commit, dirty: false }, range, selectedText: focus.fqn }, "inheritance", { symbols: [parent, focus], relationships: [{ id: "extends", generation: 0, repositoryId: "repo", commit: focus.commit, sourceId: focus.id, targetId: parent.id, type: "extends", confidence: "confirmed", detail: "Extends parent", limitations: [] }], packages: [], dependencies: [], repositoryCommits: new Map([["repo", focus.commit]]) }, 1);
+    assert.equal(graph.nodes[0]?.id, graph.focusNodeId);
+  } finally { store.close(); }
+});
+
 function typeSymbol(repositoryId: string, commit: string, generation: number, id: string, fqn: string, parent?: string): IndexedSymbol {
   const typeRange = { ...range, endLine: 5 };
   const data: ParsedType = { id, fqn, shortName: fqn.split("\\").at(-1) ?? fqn, kind: "class", abstract: false, ...(parent ? { parent } : {}), interfaces: [], traits: [], methods: [], range: typeRange };
@@ -103,6 +113,12 @@ test("origin and impact traces scope cross-repository work away from unrelated e
     const started = performance.now();
     const service = new GraphService(store);
     const selection = { repositoryPath: "/focus", relativePath: "src/Order.php", revision: { repositoryId: "focus", commit: focusCommit, dirty: false }, range, selectedText: "FocusedOrder" };
+    const overview = service.overview(selection);
+    assert.equal(overview.focusNodeId, focused.id);
+    assert.equal(overview.freshness.partial, true);
+    assert.ok(overview.nodes.some((node) => node.label === "Company\\Shared\\BaseOrder"));
+    assert.ok(overview.nodes.some((node) => node.label === "client/unrelated" && node.metadata.symbolUsage === "dependency-only"));
+    assert.equal(overview.nodes.some((node) => node.label.startsWith("Client\\UnrelatedOrder")), false);
     const graph = service.trace(selection, "origin", 100);
     const elapsedMs = performance.now() - started;
     assert.ok(graph.nodes.some((node) => node.label === "Company\\Shared\\BaseOrder"));

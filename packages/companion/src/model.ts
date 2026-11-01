@@ -52,12 +52,14 @@ export interface ParsedTypeReference {
   composite: "named" | "union" | "intersection";
   nullable: boolean;
   lateStatic: boolean;
+  alternatives?: string[][];
 }
 
 export interface ParsedParameter {
   name: string;
   byReference: boolean;
   variadic: boolean;
+  optional?: boolean;
   type?: ParsedTypeReference;
   docType?: ParsedTypeReference;
   description?: string;
@@ -76,6 +78,8 @@ export interface ParsedMethod {
   visibility: "public" | "protected" | "private";
   static: boolean;
   abstract: boolean;
+  final?: boolean;
+  returnsByReference?: boolean;
   signature: string;
   source: string;
   range: SourceRange;
@@ -99,9 +103,11 @@ export interface ParsedType {
   shortName: string;
   kind: Exclude<SymbolKind, "method">;
   abstract: boolean;
+  final?: boolean;
   parent?: string;
   interfaces: string[];
   traits: string[];
+  traitAdaptations?: Array<{ trait?: string; method: string; instead?: string[]; alias?: string; visibility?: "public" | "protected" | "private" }>;
   description?: string;
   documentationDetails?: string;
   methods: ParsedMethod[];

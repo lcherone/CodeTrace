@@ -61,6 +61,22 @@ test("method history refuses ambiguous rename continuity", async () => {
   } finally { store.close(); await rm(root, { recursive: true, force: true }); }
 });
 
+test("class history reports real inheritance and implementation changes", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "trace-class-history-")); const store = new TraceStore(":memory:");
+  try {
+    await initialise(root); await mkdir(path.join(root, "src")); const file = path.join(root, "src", "Customer.php");
+    await writeFile(file, "<?php\nnamespace Example;\nclass Customer extends BaseCustomer {\n public function name(): string { return 'first'; }\n}\n"); await commit(root, "Introduce customer");
+    await writeFile(file, "<?php\nnamespace Example;\nclass Customer extends PackageCustomer implements CustomerContract {\n public function name(): string { return 'first'; }\n}\n"); await commit(root, "Use package parent");
+    await writeFile(file, "<?php\nnamespace Example;\nclass Customer extends PackageCustomer implements CustomerContract {\n public function name(): string { return 'second'; }\n}\n"); const head = await commit(root, "Change customer behaviour");
+    const source = await readFile(file, "utf8"); const symbol = symbolsFromFiles("repo", 0, head, [parsePhp(source, "src/Customer.php")]).find((item) => item.fqn === "Example\\Customer"); assert.ok(symbol);
+    const events = await new HistoryService(store).analyze(root, symbol);
+    assert.deepEqual(events.map((event) => event.category), ["introduction", "relationship", "implementation"]);
+    assert.ok(events[1]?.beforeSource?.includes("BaseCustomer"));
+    assert.ok(events[1]?.afterSource?.includes("PackageCustomer"));
+    assert.deepEqual(store.history(symbol.id).map((event) => event.category), ["introduction", "relationship", "implementation"]);
+  } finally { store.close(); await rm(root, { recursive: true, force: true }); }
+});
+
 test("inclusion separates ancestry and patch equivalence from revert-aware active behaviour", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "trace-inclusion-")); const store = new TraceStore(":memory:");
   try {

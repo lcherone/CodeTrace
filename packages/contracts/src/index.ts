@@ -216,6 +216,7 @@ export const RelationshipTypeSchema = z.enum([
   "requires", "resolves-to", "declares", "extends", "implements", "uses-trait",
   "inherits", "overrides", "calls", "calls-parent", "changed-in", "included-in-release",
   "possible-lineage", "implements-method", "parameter-type", "return-type", "late-static-binding",
+  "signature-compatible", "signature-incompatible", "signature-unknown",
 ]);
 export type RelationshipType = z.infer<typeof RelationshipTypeSchema>;
 

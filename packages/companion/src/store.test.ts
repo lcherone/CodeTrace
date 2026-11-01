@@ -42,7 +42,17 @@ test("persists Composer identity evidence without collapsing aliases, references
   assert.equal(dependency?.declaredAlias, "2.x-dev"); assert.equal(dependency?.resolvedSourceReference, "dev-next"); assert.equal(dependency?.resolvedSourceCommit, undefined);
   assert.equal(dependency?.resolvedDistReference, "dist-ref"); assert.equal(dependency?.indexedRevision, "d".repeat(40)); assert.deepEqual(dependency?.resolutionEvidence, ["normalized URL match"]); assert.equal(dependency?.repositoryCandidates?.[0]?.canonical, false);
   const migration = store.db.prepare("SELECT MAX(version) version FROM schema_migrations").get() as { version: number };
-  assert.equal(migration.version, 8);
+  assert.equal(migration.version, 10);
+  store.close();
+});
+
+test("repository refresh preserves previously discovered Git identity", () => {
+  const store = new TraceStore(":memory:");
+  store.upsertRepository({ id: "repo", root: "/repo", remoteUrl: "git@github.com:Example/Repo.git", defaultBranch: "main", sourceRevision: "a".repeat(40) });
+  store.upsertRepository({ id: "repo", root: "/repo" });
+  assert.equal(store.repository("repo")?.remoteUrl, "github.com:Example/Repo.git");
+  assert.equal(store.repository("repo")?.defaultBranch, "main");
+  assert.equal(store.repository("repo")?.sourceRevision, "a".repeat(40));
   store.close();
 });
 

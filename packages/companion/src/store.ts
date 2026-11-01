@@ -200,6 +200,25 @@ export class TraceStore {
         COMMIT;
       `);
     }
+    if (current < 9) {
+      this.db.exec(`
+        BEGIN;
+        CREATE INDEX symbols_class_lookup ON symbols(repository_id,generation_id,lower(class_fqn));
+        CREATE INDEX symbols_file_lookup ON symbols(repository_id,generation_id,path,kind);
+        CREATE INDEX relationships_target_lookup ON relationships(repository_id,generation_id,target_id);
+        CREATE INDEX history_symbol_lookup ON history_events(symbol_id);
+        INSERT OR IGNORE INTO schema_migrations(version,applied_at) VALUES(9,datetime('now'));
+        COMMIT;
+      `);
+    }
+    if (current < 10) {
+      this.db.exec(`
+        BEGIN;
+        CREATE INDEX symbols_type_inventory ON symbols(repository_id,generation_id) WHERE kind IN ('class','interface','trait');
+        INSERT OR IGNORE INTO schema_migrations(version,applied_at) VALUES(10,datetime('now'));
+        COMMIT;
+      `);
+    }
   }
 
   private recoverInterruptedWork(): void {
@@ -216,9 +235,9 @@ export class TraceStore {
   upsertRepository(repository: RepositoryRecord): void {
     const now = new Date().toISOString();
     this.db.prepare(`INSERT INTO repositories(id,root,remote_url,default_branch,include_json,exclude_json,created_at,updated_at,source_revision,discovered_from,automatic)
-      VALUES(?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET root=excluded.root,remote_url=excluded.remote_url,
-      default_branch=excluded.default_branch,include_json=excluded.include_json,exclude_json=excluded.exclude_json,updated_at=excluded.updated_at,
-      source_revision=excluded.source_revision,discovered_from=excluded.discovered_from,automatic=excluded.automatic`)
+      VALUES(?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET root=excluded.root,remote_url=COALESCE(excluded.remote_url,repositories.remote_url),
+      default_branch=COALESCE(excluded.default_branch,repositories.default_branch),include_json=excluded.include_json,exclude_json=excluded.exclude_json,updated_at=excluded.updated_at,
+      source_revision=COALESCE(excluded.source_revision,repositories.source_revision),discovered_from=COALESCE(excluded.discovered_from,repositories.discovered_from),automatic=excluded.automatic`)
       .run(repository.id, repository.root, sanitizeRepositoryUrl(repository.remoteUrl) ?? null, repository.defaultBranch ?? null, JSON.stringify(repository.include ?? []), JSON.stringify(repository.exclude ?? []), now, now, repository.sourceRevision ?? null, repository.discoveredFrom ?? null, repository.automatic ? 1 : 0);
   }
 
@@ -324,17 +343,29 @@ export class TraceStore {
     }));
   }
 
-  activeSymbolsForRepositories(repositoryIds: readonly string[]): IndexedSymbol[] {
+  /** Small ancestry inventory; full declarations are read at exact Git revisions on demand. */
+  typeInventory(repositoryId: string): IndexedSymbol[] {
+    const rows = this.db.prepare(`SELECT s.id,s.generation_id,s.repository_id,s.commit_sha,s.path,s.kind,s.fqn,s.range_json,
+      json_extract(s.data_json,'$.parent') AS parent,
+      json_extract(s.data_json,'$.interfaces') AS interfaces,
+      json_extract(s.data_json,'$.traits') AS traits
+      FROM symbols s JOIN repositories r ON r.id=s.repository_id AND r.active_generation=s.generation_id
+      WHERE s.repository_id=? AND s.kind IN ('class','interface','trait')`).all(repositoryId) as Row[];
+    return rows.map((row) => ({ id: String(row.id), generation: Number(row.generation_id), repositoryId, commit: String(row.commit_sha), path: String(row.path), kind: row.kind as IndexedSymbol["kind"], fqn: String(row.fqn), range: JSON.parse(String(row.range_json)), data: { fqn: String(row.fqn), kind: row.kind, parent: row.parent ? String(row.parent) : undefined, interfaces: row.interfaces ? JSON.parse(String(row.interfaces)) : [], traits: row.traits ? JSON.parse(String(row.traits)) : [], methods: [] } as unknown as IndexedSymbol["data"] }));
+  }
+
+  activeSymbolsForRepositories(repositoryIds: readonly string[], pathName?: string, typesOnly = false, symbolIds?: readonly string[]): IndexedSymbol[] {
     if (!repositoryIds.length) return [];
+    if (symbolIds && !symbolIds.length) return [];
     const placeholders = repositoryIds.map(() => "?").join(",");
-    return (this.db.prepare(`SELECT s.* FROM symbols s JOIN repositories r ON r.id=s.repository_id AND r.active_generation=s.generation_id WHERE s.repository_id IN (${placeholders})`).all(...repositoryIds) as Row[]).map((row) => ({
+    return (this.db.prepare(`SELECT s.* FROM symbols s JOIN repositories r ON r.id=s.repository_id AND r.active_generation=s.generation_id WHERE s.repository_id IN (${placeholders})${pathName === undefined ? "" : " AND s.path=?"}${typesOnly ? " AND s.kind<>'method'" : ""}${symbolIds ? ` AND s.id IN (${symbolIds.map(() => "?").join(",")})` : ""}`).all(...repositoryIds, ...(pathName === undefined ? [] : [pathName]), ...(symbolIds ?? [])) as Row[]).map((row) => ({
       id: String(row.id), generation: Number(row.generation_id), repositoryId: String(row.repository_id), commit: String(row.commit_sha), path: String(row.path), kind: row.kind as IndexedSymbol["kind"], fqn: String(row.fqn),
       ...(row.member_name ? { memberName: String(row.member_name) } : {}), ...(row.class_fqn ? { classFqn: String(row.class_fqn) } : {}),
       range: JSON.parse(String(row.range_json)), data: JSON.parse(String(row.data_json)),
     }));
   }
 
-  activeSymbolsMatchingClasses(repositoryIds: readonly string[], classFqns: readonly string[]): IndexedSymbol[] {
+  activeSymbolsMatchingClasses(repositoryIds: readonly string[], classFqns: readonly string[], includeMethods = true): IndexedSymbol[] {
     if (!repositoryIds.length || !classFqns.length) return [];
     const rowsById = new Map<string, Row>();
     const normalizedClasses = [...new Set(classFqns.map((item) => item.toLowerCase()))];
@@ -349,8 +380,8 @@ export class TraceStore {
         const rows = this.db.prepare(`SELECT s.* FROM symbols s
           JOIN repositories r ON r.id=s.repository_id AND r.active_generation=s.generation_id
           WHERE s.repository_id IN (${repositoryPlaceholders})
-            AND (lower(s.fqn) IN (${classPlaceholders}) OR lower(s.class_fqn) IN (${classPlaceholders}))`)
-          .all(...repositories, ...classes, ...classes) as Row[];
+            AND (lower(s.fqn) IN (${classPlaceholders})${includeMethods ? ` OR lower(s.class_fqn) IN (${classPlaceholders})` : ""})`)
+          .all(...repositories, ...classes, ...(includeMethods ? classes : [])) as Row[];
         for (const row of rows) rowsById.set(String(row.id), row);
       }
     }
@@ -381,10 +412,12 @@ export class TraceStore {
     }));
   }
 
-  activeRelationshipsForRepositories(repositoryIds: readonly string[]): IndexedRelationship[] {
+  activeRelationshipsForRepositories(repositoryIds: readonly string[], symbolIds?: readonly string[]): IndexedRelationship[] {
     if (!repositoryIds.length) return [];
+    if (symbolIds && !symbolIds.length) return [];
     const placeholders = repositoryIds.map(() => "?").join(",");
-    return (this.db.prepare(`SELECT x.* FROM relationships x JOIN repositories r ON r.id=x.repository_id AND r.active_generation=x.generation_id WHERE x.repository_id IN (${placeholders})`).all(...repositoryIds) as Row[]).map((row) => ({
+    const symbolPlaceholders = symbolIds?.map(() => "?").join(",");
+    return (this.db.prepare(`SELECT x.* FROM relationships x JOIN repositories r ON r.id=x.repository_id AND r.active_generation=x.generation_id WHERE x.repository_id IN (${placeholders})${symbolIds ? ` AND (x.source_id IN (${symbolPlaceholders}) OR x.target_id IN (${symbolPlaceholders}))` : ""}`).all(...repositoryIds, ...(symbolIds ?? []), ...(symbolIds ?? [])) as Row[]).map((row) => ({
       id: String(row.id), generation: Number(row.generation_id), repositoryId: String(row.repository_id), commit: String(row.commit_sha), sourceId: String(row.source_id), targetId: String(row.target_id), type: row.type as IndexedRelationship["type"], confidence: row.confidence as IndexedRelationship["confidence"],
       ...(row.path ? { path: String(row.path) } : {}), ...(row.range_json ? { range: JSON.parse(String(row.range_json)) } : {}), detail: String(row.detail), limitations: JSON.parse(String(row.limitations_json)), ...(row.resolution_method ? { resolutionMethod: String(row.resolution_method) } : {}),
     }));

@@ -131,6 +131,7 @@ test("inclusion route returns revert-aware release assessments", async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "trace-server-inclusion-")); const repository = path.join(directory, "repository");
   const token = "test-token-that-is-long-enough"; await mkdir(path.join(repository, "src"), { recursive: true });
   await exec("git", ["init", "-b", "main", repository]); await exec("git", ["-C", repository, "config", "user.name", "Trace Test"]); await exec("git", ["-C", repository, "config", "user.email", "trace@example.test"]);
+  await exec("git", ["-C", repository, "remote", "add", "origin", "git@github.com:Example/Package.git"]);
   await writeFile(path.join(repository, "composer.json"), JSON.stringify({ name: "example/package", autoload: { "psr-4": { "Example\\": "src/" } } }));
   await writeFile(path.join(repository, "src", "Service.php"), "<?php namespace Example; class Service { public function value(): int { return 1; } }");
   await exec("git", ["-C", repository, "add", "--all"]); await exec("git", ["-C", repository, "commit", "-m", "Initial service"]);
@@ -152,7 +153,8 @@ test("inclusion route returns revert-aware release assessments", async () => {
   const companion = await startServer({ host: "127.0.0.1", port: 0, dataDirectory: path.join(directory, "data"), fixtureMode: false, token, automaticScan: false, scanner: { watchFileSystem: false, discoverComposerPackages: false }, githubApiBase: `http://127.0.0.1:${githubAddress.port}` });
   const headers = { "Content-Type": "application/json", "X-Trace-Protocol": PROTOCOL_VERSION, Authorization: `Bearer ${token}` };
   try {
-    companion.store.upsertRepository({ id: "package", root: repository, remoteUrl: "git@github.com:Example/Package.git" });
+    const registered = await fetch(`${companion.url}/v1/repositories`, { method: "POST", headers, body: JSON.stringify({ protocolVersion: PROTOCOL_VERSION, id: "package", root: repository }) }); assert.equal(registered.status, 201);
+    const registeredPayload = await registered.json() as { remoteUrl?: string; defaultBranch?: string }; assert.equal(registeredPayload.remoteUrl, "github.com:Example/Package.git"); assert.equal(registeredPayload.defaultBranch, "main");
     const indexed = await fetch(`${companion.url}/v1/index`, { method: "POST", headers, body: JSON.stringify({ protocolVersion: PROTOCOL_VERSION, repositoryId: "package" }) }); assert.equal(indexed.status, 200);
     companion.store.upsertRepository({ id: "consumer", root: consumer }); const consumerIndexed = await fetch(`${companion.url}/v1/index`, { method: "POST", headers, body: JSON.stringify({ protocolVersion: PROTOCOL_VERSION, repositoryId: "consumer" }) }); assert.equal(consumerIndexed.status, 200);
     const packageResponse = await fetch(`${companion.url}/v1/packages`, { headers: { "X-Trace-Protocol": PROTOCOL_VERSION, Authorization: `Bearer ${token}` } }); assert.equal(packageResponse.status, 200);

@@ -50,7 +50,29 @@ export function graphView(
     adjacency.set(edge.target, [...(adjacency.get(edge.target) ?? []), edge]);
   }
 
-  const maxDepth = depth === "focused" ? 1 : depth === "neighbours" ? 2 : Number.POSITIVE_INFINITY;
+  const focusNode = nodesById.get(graph.focusNodeId);
+  if (depth === "focused" && focusNode?.metadata.methodImpact) {
+    const ids = new Set(graph.nodes.filter((node) => node.metadata.impactOverview).slice(0, Math.max(1, nodeLimit)).map((node) => node.id));
+    ids.add(graph.focusNodeId);
+    const edge = graph.edges.find((item) => item.id === pinnedId);
+    if (edge) { ids.add(edge.source); ids.add(edge.target); }
+    else if (pinnedId && nodesById.has(pinnedId)) ids.add(pinnedId);
+    const nodes = graph.nodes.filter((node) => ids.has(node.id));
+    const seen = new Set<string>();
+    const edges = graph.edges.filter((item) => { if (!ids.has(item.source) || !ids.has(item.target)) return false; const key = `${item.source}\0${item.target}\0${item.type}`; if (seen.has(key)) return false; seen.add(key); return true; });
+    return { nodes, edges, hiddenNodeCount: graph.nodes.length - nodes.length, hiddenEdgeCount: graph.edges.length - edges.length };
+  }
+  const lineageOverview = depth === "focused" && !focusNode?.metadata.explored && Boolean(focusNode && ["class", "interface", "trait"].includes(focusNode.kind));
+  const hasParentStory = graph.nodes.some((node) => node.metadata.storyRole === "parent");
+  const overviewEdge = (edge: GraphEdge): boolean => {
+    if (["extends", "inherits", "requires"].includes(edge.type)) return true;
+    if (!hasParentStory && edge.type === "implements" && (edge.source === graph.focusNodeId || edge.target === graph.focusNodeId)) return true;
+    if (edge.type !== "declares") return false;
+    const sourceRole = nodesById.get(edge.source)?.metadata.storyRole;
+    const targetRole = nodesById.get(edge.target)?.metadata.storyRole;
+    return sourceRole === "parent-package" || targetRole === "parent-package";
+  };
+  const maxDepth = lineageOverview ? 3 : depth === "focused" ? 1 : depth === "neighbours" ? 2 : Number.POSITIVE_INFINITY;
   const distance = new Map<string, number>([[graph.focusNodeId, 0]]);
   const queue = [graph.focusNodeId];
   for (let index = 0; index < queue.length; index += 1) {
@@ -58,6 +80,7 @@ export function graphView(
     const nextDistance = (distance.get(nodeId) ?? 0) + 1;
     if (nextDistance > maxDepth) continue;
     for (const edge of adjacency.get(nodeId) ?? []) {
+      if (lineageOverview && !overviewEdge(edge)) continue;
       const otherId = edge.source === nodeId ? edge.target : edge.source;
       if (distance.has(otherId)) continue;
       distance.set(otherId, nextDistance);
@@ -79,6 +102,10 @@ export function graphView(
   const nodeScore = (nodeId: string): number => {
     if (nodeId === graph.focusNodeId) return -1;
     if (nodeId === pinnedId || pinnedEdge?.source === nodeId || pinnedEdge?.target === nodeId) return 0;
+    const storyRole = nodesById.get(nodeId)?.metadata.storyRole;
+    if (storyRole === "parent") return 1;
+    if (storyRole === "parent-package") return 2;
+    if (storyRole === "consumer-project") return 3;
     const nearestEdge = Math.min(...(adjacency.get(nodeId) ?? []).map(edgeScore), 99);
     return (distance.get(nodeId) ?? 999) * 100 + nearestEdge;
   };
@@ -97,7 +124,7 @@ export function graphView(
   }
 
   const nodes = graph.nodes.filter((node) => visibleIds.has(node.id));
-  const edges = graph.edges.filter((edge) => visibleIds.has(edge.source) && visibleIds.has(edge.target) && candidateIds.has(edge.source) && candidateIds.has(edge.target));
+  const edges = graph.edges.filter((edge) => visibleIds.has(edge.source) && visibleIds.has(edge.target) && candidateIds.has(edge.source) && candidateIds.has(edge.target) && (!lineageOverview || overviewEdge(edge)));
   return {
     nodes,
     edges,

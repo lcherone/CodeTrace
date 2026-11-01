@@ -34,11 +34,11 @@ export interface GraphSnapshotData {
   indexedAt?: string;
 }
 
-interface QueryState { response: GraphResponse; symbols: IndexedSymbol[]; relationships: IndexedRelationship[] }
+export interface QueryState { response: GraphResponse; symbols: IndexedSymbol[]; relationships: IndexedRelationship[]; anchor?: IndexedSymbol }
 
 const label = (type: IndexedRelationship["type"]): string => type.split("-").map((word) => word[0]?.toUpperCase() + word.slice(1)).join(" ");
 
-function graphNode(symbol: IndexedSymbol, focus = false, overlayId?: string): GraphNode {
+export function graphNode(symbol: IndexedSymbol, focus = false, overlayId?: string): GraphNode {
   const method = symbol.kind === "method" ? symbol.data as ParsedMethod : undefined;
   const type = symbol.kind !== "method" ? symbol.data as ParsedType : undefined;
   const parameters = (method?.parameters ?? []).map((parameter) => {
@@ -87,7 +87,7 @@ function graphNode(symbol: IndexedSymbol, focus = false, overlayId?: string): Gr
   };
 }
 
-function relationEdge(relation: IndexedRelationship): GraphEdge {
+export function relationEdge(relation: IndexedRelationship): GraphEdge {
   return {
     id: relation.id, source: relation.sourceId, target: relation.targetId, type: relation.type,
     label: label(relation.type), confidence: relation.confidence,
@@ -112,7 +112,7 @@ function methodContractMetadata(method: ParsedMethod): Record<string, unknown> {
   };
 }
 
-function crossRepositoryRelationships(symbols: IndexedSymbol[], packages: ComposerPackage[], dependencies: ComposerDependency[], _mappings: Map<string, string>, sourceRepositories?: ReadonlySet<string>): IndexedRelationship[] {
+export function crossRepositoryRelationships(symbols: IndexedSymbol[], packages: ComposerPackage[], dependencies: ComposerDependency[], _mappings: Map<string, string>, sourceRepositories?: ReadonlySet<string>): IndexedRelationship[] {
   const existing = new Set<string>();
   const result: IndexedRelationship[] = [];
   const types = symbols.filter((symbol) => symbol.kind !== "method");
@@ -191,6 +191,12 @@ function crossRepositoryRelationships(symbols: IndexedSymbol[], packages: Compos
       existing.add(key);
       result.push({ id: `cross:${key}`, generation: type.generation, repositoryId: type.repositoryId, commit: type.commit, sourceId: type.id, targetId: target.id, type: relationshipType, confidence: "confirmed", path: type.path, range: type.range, detail: `${type.fqn} ${relationshipType} exact indexed dependency ${target.fqn}`, limitations: [] });
     }
+    for (const traitName of data.traits ?? []) {
+      const target = candidates(traitName, repositories).find((item) => item.repositoryId !== type.repositoryId);
+      if (!target) continue;
+      const key = `${type.id}|${target.id}|uses-trait`;
+      result.push({ id: `cross:${key}`, generation: type.generation, repositoryId: type.repositoryId, commit: type.commit, sourceId: type.id, targetId: target.id, type: "uses-trait", confidence: "confirmed", path: type.path, range: type.range, detail: `${type.fqn} uses exact indexed dependency trait ${target.fqn}`, limitations: ["Trait adaptations require additional review"] });
+    }
   }
   for (const method of methods) {
     if (sourceRepositories && !sourceRepositories.has(method.repositoryId)) continue;
@@ -199,7 +205,7 @@ function crossRepositoryRelationships(symbols: IndexedSymbol[], packages: Compos
     const parentFqn = (owner?.data as any)?.parent as string | undefined;
     const parsed = method.data as ParsedMethod;
     if (parentFqn) {
-      const target = methodCandidate(parentFqn, method.memberName ?? "", repositories);
+      const target = inheritedMethodCandidate(parentFqn, method.memberName ?? "", repositories);
       if (target && target.repositoryId !== method.repositoryId) {
         const key = `${method.id}|${target.id}|overrides`;
         result.push({ id: `cross:${key}`, generation: method.generation, repositoryId: method.repositoryId, commit: method.commit, sourceId: method.id, targetId: target.id, type: "overrides", confidence: "confirmed", path: method.path, range: method.range, detail: "Override resolved through exact Composer source commit", limitations: [] });
@@ -360,6 +366,18 @@ export class GraphService {
   private snapshotCache: ActiveGraphSnapshot | undefined;
   constructor(private readonly store: TraceStore) {}
 
+  query(queryId: string): QueryState {
+    const query = this.queries.get(queryId);
+    if (!query) throw new Error("Graph query has expired; run the trace again");
+    return query;
+  }
+
+  remember(query: QueryState): GraphResponse {
+    this.queries.set(query.response.queryId, query);
+    if (this.queries.size > 100) this.queries.delete(this.queries.keys().next().value ?? "");
+    return query.response;
+  }
+
   private async requestCheckpoint(signal?: AbortSignal): Promise<void> {
     signal?.throwIfAborted();
     await new Promise<void>((resolve) => setImmediate(resolve));
@@ -488,6 +506,20 @@ export class GraphService {
     return this.traceWithSnapshot(selection, mode, this.snapshot(selection, mode), limit, false);
   }
 
+  overview(selection: Selection, limit = 100): GraphResponse {
+    const repositoryId = selection.revision.repositoryId;
+    const symbols = this.store.activeSymbolsForRepositories([repositoryId], selection.relativePath);
+    const snapshot: ActiveGraphSnapshot = {
+      key: "overview", symbols, relationships: [], crossRepositoryRelationships: [],
+      packages: this.store.activePackages(), dependencies: this.store.activeDependencies(), mappings: new Map(),
+      repositoryCommits: new Map([[repositoryId, selection.revision.commit]]), active: true,
+    };
+    const response = this.traceWithSnapshot(selection, "impact", snapshot, limit, false, true);
+    response.freshness.partial = true;
+    response.freshness.limitations.push("Overview loaded; wider impact relationships are loading in the background");
+    return response;
+  }
+
   async traceAsync(selection: Selection, mode: Mode, limit = 100, signal?: AbortSignal): Promise<GraphResponse> {
     const snapshot = mode === "origin" || mode === "impact" ? await this.scopedSnapshot(selection, mode, signal) : this.snapshot(selection, mode);
     signal?.throwIfAborted();
@@ -506,7 +538,7 @@ export class GraphService {
     return this.traceWithSnapshot(selection, mode, snapshot, limit, true);
   }
 
-  private traceWithSnapshot(selection: Selection, mode: Mode, snapshot: ActiveGraphSnapshot, limit: number, exhaustive: boolean): GraphResponse {
+  private traceWithSnapshot(selection: Selection, mode: Mode, snapshot: ActiveGraphSnapshot, limit: number, exhaustive: boolean, overview = false): GraphResponse {
     let symbols = snapshot.symbols;
     let relationships = snapshot.relationships;
     const { packages, dependencies, mappings } = snapshot;
@@ -525,6 +557,21 @@ export class GraphService {
       const crossRelationships = overlayId ? crossRepositoryRelationships(symbols, packages, dependencies, mappings, snapshot.crossSourceRepositories) : snapshot.crossRepositoryRelationships;
       relationships = relationships.concat(crossRelationships);
     } else relationships = relationships.concat(snapshot.crossRepositoryRelationships);
+
+    const focusType = focus.kind === "method" ? undefined : focus.data as ParsedType;
+    const declaredParent = focusType?.parent;
+    const focusDependencyPackages = new Set(dependencies.filter((item) => item.repositoryId === focus.repositoryId).map((item) => item.packageName));
+    const parentCandidate = snapshot.active && declaredParent
+      ? this.store.activeSymbolsMatchingClasses([...new Set(packages.map((item) => item.repositoryId))], [declaredParent], false).find((item) => {
+        const candidatePackage = packages.find((pkg) => pkg.repositoryId === item.repositoryId);
+        return item.kind !== "method" && item.repositoryId !== focus.repositoryId && Boolean(candidatePackage && focusDependencyPackages.has(candidatePackage.name));
+      })
+      : undefined;
+    const parentPackage = parentCandidate ? packages.find((item) => item.repositoryId === parentCandidate.repositoryId) : undefined;
+    const parentConsumers = mode === "impact" && parentPackage
+      ? dependencies.filter((item) => item.packageName === parentPackage.name)
+      : [];
+    const narrativeReserve = parentConsumers.length ? parentConsumers.length + 2 : 0;
 
     const edgeAllowed = (edge: IndexedRelationship) => {
       if (mode === "origin") return ["overrides", "implements-method", "inherits", "extends", "implements", "uses-trait", "calls-parent", "declares", "parameter-type", "return-type", "late-static-binding"].includes(edge.type);
@@ -554,9 +601,10 @@ export class GraphService {
     }
     if (selectedEdges.length >= limit && relationships.some((edge) => edgeAllowed(edge) && !selectedEdgeIds.has(edge.id) && (frontier.has(edge.sourceId) || frontier.has(edge.targetId)))) edgeLimitTruncated = true;
     const depthTruncated = !exhaustive && depth >= 3 && relationships.some((edge) => edgeAllowed(edge) && !selectedEdgeIds.has(edge.id) && (frontier.has(edge.sourceId) || frontier.has(edge.targetId)));
-    const visibleSymbols = symbols.filter((symbol) => seen.has(symbol.id));
+    const visibleSymbols = [focus, ...symbols.filter((symbol) => symbol.id !== focus.id && seen.has(symbol.id))];
     let nodeLimitTruncated = visibleSymbols.length > limit;
-    const nodes = visibleSymbols.slice(0, limit).map((symbol) => graphNode(symbol, symbol.id === focus?.id, symbol.id.includes("#overlay:") ? overlayId : undefined));
+    const symbolLimit = Math.max(1, limit - narrativeReserve);
+    const nodes = visibleSymbols.slice(0, symbolLimit).map((symbol) => graphNode(symbol, symbol.id === focus?.id, symbol.id.includes("#overlay:") ? overlayId : undefined));
     for (const node of nodes) {
       const contractSources = selectedEdges.flatMap((edge) => {
         if (edge.sourceId !== node.id || !["overrides", "implements-method"].includes(edge.type)) return [];
@@ -568,7 +616,75 @@ export class GraphService {
     }
     const edges = selectedEdges.filter((edge) => nodes.some((node) => node.id === edge.sourceId) && nodes.some((node) => node.id === edge.targetId)).map(relationEdge);
 
-    if (["consumers", "impact"].includes(mode)) {
+    if (declaredParent && parentCandidate && parentPackage && parentConsumers.length) {
+      const parentId = `declared-parent:${focus.id}:${declaredParent.toLowerCase()}`;
+      const packageId = `package-family:${parentPackage.name}`;
+      const exactConsumer = parentConsumers.find((item) => item.repositoryId === focus.repositoryId);
+      const expectedRevision = exactConsumer?.resolvedSourceCommit ?? exactConsumer?.indexedRevision;
+      const exactRevisionAvailable = Boolean(expectedRevision && parentCandidate.commit === expectedRevision);
+      nodes.push({
+        id: parentId,
+        kind: parentCandidate.kind,
+        label: declaredParent,
+        subtitle: exactRevisionAvailable ? "Parent class" : "Parent class · revision not indexed",
+        metadata: {
+          storyRole: "parent",
+          packageName: parentPackage.name,
+          declaredBy: focus.fqn,
+          expectedRevision,
+          indexedRevision: parentCandidate.commit,
+          indexedCandidateId: parentCandidate.id,
+          repositoryId: parentCandidate.repositoryId,
+          symbolAnalysis: exactRevisionAvailable ? "available" : "unavailable-for-exact-revision",
+        },
+      });
+      nodes.push({
+        id: packageId,
+        kind: "package-revision",
+        label: parentPackage.name,
+        subtitle: `${parentConsumers.length} dependent project${parentConsumers.length === 1 ? "" : "s"}`,
+        metadata: { storyRole: "parent-package", packageName: parentPackage.name, consumers: parentConsumers.map((item) => ({ repositoryId: item.repositoryId, version: item.resolvedVersion, revision: item.resolvedSourceCommit, resolution: item.resolution })) },
+      });
+      edges.push({
+        id: `declared-parent:${focus.id}:${parentId}`,
+        source: focus.id,
+        target: parentId,
+        type: "extends",
+        label: "Parent",
+        confidence: exactRevisionAvailable ? "confirmed" : "unresolved",
+        evidence: [{ repositoryId: focus.repositoryId, commit: focus.commit, path: focus.path, range: focus.range, resolutionMethod: exactRevisionAvailable ? "composer-package-and-symbol-index" : "php-declaration-and-composer-lock", confidence: exactRevisionAvailable ? "confirmed" : "unresolved", detail: exactRevisionAvailable ? `${focus.fqn} extends the exact indexed ${declaredParent}` : `${focus.fqn} declares ${declaredParent}, but ${parentPackage.name} is locked at ${expectedRevision ?? "an unavailable revision"} while the indexed parent symbol is ${parentCandidate.commit}`, limitations: exactRevisionAvailable ? [] : ["The declared parent is confirmed, but symbol analysis for the exact locked package revision is unavailable"] }],
+      });
+      edges.push({
+        id: `package-parent:${packageId}:${parentId}`,
+        source: packageId,
+        target: parentId,
+        type: "declares",
+        label: "Provides parent",
+        confidence: exactRevisionAvailable ? "confirmed" : "unresolved",
+        evidence: [{ repositoryId: parentPackage.repositoryId, commit: parentCandidate.commit, path: parentCandidate.path, range: parentCandidate.range, resolutionMethod: "package-symbol-candidate", confidence: exactRevisionAvailable ? "confirmed" : "unresolved", detail: `${parentPackage.name} contains the indexed candidate for ${declaredParent}`, limitations: exactRevisionAvailable ? [] : ["The indexed package candidate is from a different revision than the selected project lock"] }],
+      });
+      for (const dependency of parentConsumers) {
+        const projectId = `project:${dependency.repositoryId}`;
+        const consumerPackage = packages.find((item) => item.repositoryId === dependency.repositoryId);
+        const existing = nodes.find((node) => node.id === projectId);
+        if (existing) {
+          existing.label = consumerPackage?.name ?? dependency.repositoryId;
+          existing.subtitle = `Uses ${parentPackage.name} ${dependency.resolvedVersion ?? dependency.declaredConstraint ?? ""}`.trim();
+          existing.metadata = { ...existing.metadata, storyRole: "consumer-project", packageName: parentPackage.name };
+        } else nodes.push({ id: projectId, kind: "project", label: consumerPackage?.name ?? dependency.repositoryId, subtitle: `Uses ${parentPackage.name} ${dependency.resolvedVersion ?? dependency.declaredConstraint ?? ""}`.trim(), metadata: { storyRole: "consumer-project", packageName: parentPackage.name, symbolUsage: "dependency-only" } });
+        edges.push({
+          id: `parent-package-consumer:${dependency.repositoryId}:${parentPackage.name}`,
+          source: projectId,
+          target: packageId,
+          type: "requires",
+          label: "Uses package",
+          confidence: "dependency-only",
+          evidence: [{ repositoryId: dependency.repositoryId, commit: symbols.find((item) => item.repositoryId === dependency.repositoryId)?.commit ?? "unknown", resolutionMethod: dependency.resolvedSourceCommit ? "composer-lock" : "composer-json", confidence: "dependency-only", detail: `${dependency.repositoryId} resolves ${parentPackage.name} ${dependency.resolvedVersion ?? dependency.declaredConstraint ?? ""}`.trim(), limitations: ["Package installation identifies potential impact; it does not prove this class executes at runtime"] }],
+        });
+      }
+    }
+
+    if (!overview && ["consumers", "impact"].includes(mode)) {
       // A consumer-local override can focus the query while the package-owned parent is
       // elsewhere in the selected neighbourhood. Resolve consumer packages from every
       // symbol already in that neighbourhood instead of assuming the focus is package-owned.
@@ -692,7 +808,8 @@ export class GraphService {
       ...(edgeLimitTruncated || nodeLimitTruncated || edgeFilteringTruncated ? ["Graph traversal was truncated by the requested node or edge limit"] : []),
     ];
     const response: GraphResponse = { protocolVersion: PROTOCOL_VERSION, queryId: randomUUID(), mode, focusNodeId: focus.id, nodes, edges: responseEdges, history, freshness: { generation: focus.generation, indexedAt: snapshot.indexedAt ?? new Date().toISOString(), repositories, partial: limitations.length > 0, limitations } };
-    this.queries.set(response.queryId, { response, symbols, relationships });
+    if (selection.revision.dirty && !overlayId) for (const node of nodes) if (node.occurrence?.revision.repositoryId === focus.repositoryId && node.occurrence.path === selection.relativePath) node.metadata.unsavedEditor = true;
+    this.queries.set(response.queryId, { response, symbols, relationships, anchor: focus });
     if (this.queries.size > 100) this.queries.delete(this.queries.keys().next().value ?? "");
     return response;
   }
@@ -712,8 +829,8 @@ export class GraphService {
         if (symbol && !nodes.some((node) => node.id === id)) nodes.push(graphNode(symbol));
       }
     }
-    const expanded = { ...previous, queryId: randomUUID(), nodes, edges, freshness: { ...previous.freshness, partial: false } };
-    this.queries.set(expanded.queryId, { response: expanded, symbols: query.symbols, relationships: query.relationships });
+    const expanded = { ...previous, queryId: randomUUID(), nodes, edges };
+    this.queries.set(expanded.queryId, { ...query, response: expanded });
     return expanded;
   }
 }

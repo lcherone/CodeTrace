@@ -12,6 +12,8 @@ import { GitRepository } from "./git.js";
 import { GraphService } from "./graph.js";
 import { GitHubClient, parseGitHubRepository } from "./github.js";
 import { HistoryService } from "./history.js";
+import { ExplorationService } from "./exploration.js";
+import { MethodImpactService } from "./method-impact.js";
 import { IndexCoordinator, ScannerBackpressureError, type ScannerOptions } from "./indexer.js";
 import { LensCountService, LensRevisionError } from "./lens-counts.js";
 import type { RepositoryRecord } from "./model.js";
@@ -19,7 +21,7 @@ import { linkComposerRevisions } from "./relationships.js";
 import { TraceStore } from "./store.js";
 import { TemporalGraphService, TemporalRevisionError } from "./temporal.js";
 
-const TraceRequest = z.object({ protocolVersion: z.literal(PROTOCOL_VERSION), mode: z.enum(["origin", "inheritance", "callers", "consumers", "impact", "history"]), selection: SelectionSchema, limit: z.number().int().min(1).max(500).optional() });
+const TraceRequest = z.object({ protocolVersion: z.literal(PROTOCOL_VERSION), mode: z.enum(["origin", "inheritance", "callers", "consumers", "impact", "history"]), stage: z.enum(["overview", "complete"]).optional(), selection: SelectionSchema, limit: z.number().int().min(1).max(500).optional() });
 const RepositoryRequest = z.object({ protocolVersion: z.literal(PROTOCOL_VERSION), id: z.string().min(1).max(200), root: z.string().min(1), remoteUrl: z.string().min(1).optional(), defaultBranch: z.string().optional(), include: z.array(z.string()).optional(), exclude: z.array(z.string()).optional() });
 
 export interface ServerOptions { host: string; port: number; dataDirectory: string; fixtureMode: boolean; token?: string; automaticScan?: boolean; scanner?: ScannerOptions; githubApiBase?: string }
@@ -70,8 +72,22 @@ export async function startServer(options: ServerOptions): Promise<{ close: () =
   const temporalGraphs = new TemporalGraphService(store, graphs);
   const lensCounts = new LensCountService(store);
   const history = new HistoryService(store);
+  const exploration = new ExplorationService(store, graphs);
+  const methodImpact = new MethodImpactService(store, graphs);
   const browserSessions = new BrowserSessionBroker();
   const editorContexts = new EditorContextHub();
+  const enrichRepository = async (repository: RepositoryRecord): Promise<RepositoryRecord> => {
+    if (repository.remoteUrl && repository.defaultBranch) return repository;
+    const git = new GitRepository(repository.root);
+    const [remoteUrl, revision] = await Promise.all([git.remoteUrl(), git.headIdentity()]);
+    const discoveredRemoteUrl = sanitizeRepositoryUrl(remoteUrl);
+    return {
+      ...repository,
+      ...(!repository.remoteUrl && discoveredRemoteUrl ? { remoteUrl: discoveredRemoteUrl } : {}),
+      ...(!repository.defaultBranch && revision.branch ? { defaultBranch: revision.branch } : {}),
+      ...(!repository.sourceRevision ? { sourceRevision: revision.commit } : {}),
+    };
+  };
   const [browserHtml, browserBridge, browserScript, browserStyles, browserFont] = await Promise.all([
     readFile(new URL("./browser/index.html", import.meta.url)),
     readFile(new URL("./browser/bridge.js", import.meta.url)),
@@ -166,7 +182,7 @@ export async function startServer(options: ServerOptions): Promise<{ close: () =
       if (url.pathname === "/v1/repositories" && method === "POST") {
         const parsed = RepositoryRequest.parse(await body(request)); const root = await realpath(parsed.root); const info = await stat(path.join(root, ".git")); if (!info) throw new Error("Not a Git repository");
         const remoteUrl = sanitizeRepositoryUrl(parsed.remoteUrl);
-        const record: RepositoryRecord = { id: parsed.id, root, ...(remoteUrl ? { remoteUrl } : {}), ...(parsed.defaultBranch ? { defaultBranch: parsed.defaultBranch } : {}), ...(parsed.include ? { include: parsed.include } : {}), ...(parsed.exclude ? { exclude: parsed.exclude } : {}) };
+        const record = await enrichRepository({ id: parsed.id, root, ...(remoteUrl ? { remoteUrl } : {}), ...(parsed.defaultBranch ? { defaultBranch: parsed.defaultBranch } : {}), ...(parsed.include ? { include: parsed.include } : {}), ...(parsed.exclude ? { exclude: parsed.exclude } : {}) });
         store.upsertRepository(record); indexer.addRepository(record, options.automaticScan !== false); return json(response, 201, record);
       }
       if (url.pathname.startsWith("/v1/repositories/") && method === "DELETE") {
@@ -190,7 +206,9 @@ export async function startServer(options: ServerOptions): Promise<{ close: () =
         const parsed = TraceRequest.parse(await body(request)); const repository = store.listRepositories().find((item) => item.root === parsed.selection.repositoryPath);
         if (!repository) return json(response, 404, errorBody("NOT_FOUND", "Repository is not configured; add or refresh it first"));
         const selection = { ...parsed.selection, revision: { ...parsed.selection.revision, repositoryId: repository.id } };
-        let graph = await graphs.traceAsync(selection, parsed.mode, parsed.limit, requestAbort.signal);
+        let graph = parsed.mode === "impact" && parsed.stage === "overview"
+          ? graphs.overview(selection, parsed.limit)
+          : await graphs.traceAsync(selection, parsed.mode, parsed.limit, requestAbort.signal);
         if (parsed.mode === "history") {
           const focus = store.activeSymbols().find((symbol) => symbol.id === graph.focusNodeId); if (focus) { await history.analyze(repository.root, focus, AbortSignal.timeout(120_000)); graph = await graphs.traceAsync(selection, parsed.mode, parsed.limit, requestAbort.signal); }
         }
@@ -208,12 +226,33 @@ export async function startServer(options: ServerOptions): Promise<{ close: () =
       if (url.pathname === "/v1/graph/expand" && method === "POST") {
         const parsed = z.object({ protocolVersion: z.literal(PROTOCOL_VERSION), queryId: z.string(), nodeId: z.string(), direction: z.enum(["in", "out", "both"]) }).parse(await body(request)); const expanded = graphs.expand(parsed.queryId, parsed.nodeId, parsed.direction); return json(response, 200, browserAuthenticated && !bearerAuthenticated ? graphWithoutSource(expanded) : expanded);
       }
+      if (url.pathname === "/v1/graph/explore" && method === "POST") {
+        const parsed = z.object({ protocolVersion: z.literal(PROTOCOL_VERSION), queryId: z.string().min(1), nodeId: z.string().min(1), stage: z.enum(["overview", "complete"]).optional() }).parse(await body(request));
+        const result = await exploration.explore(parsed.queryId, parsed.nodeId, requestAbort.signal, parsed.stage === "overview");
+        return json(response, 200, browserAuthenticated && !bearerAuthenticated ? graphWithoutSource(result) : result);
+      }
+      if (url.pathname === "/v1/graph/details" && method === "POST") {
+        const parsed = z.object({ protocolVersion: z.literal(PROTOCOL_VERSION), queryId: z.string().min(1), itemId: z.string().min(1) }).parse(await body(request));
+        return json(response, 200, await exploration.details(parsed.queryId, parsed.itemId));
+      }
+      if (url.pathname === "/v1/graph/compatibility" && method === "POST") {
+        const parsed = z.object({ protocolVersion: z.literal(PROTOCOL_VERSION), queryId: z.string().min(1), itemId: z.string().min(1), targetRef: z.string().min(1).max(200).regex(/^[A-Za-z0-9_][A-Za-z0-9_./-]*$/).optional() }).parse(await body(request));
+        return json(response, 200, await exploration.compatibility(parsed.queryId, parsed.itemId, parsed.targetRef));
+      }
+      if (url.pathname === "/v1/method-impact" && method === "POST") {
+        const parsed = z.object({ protocolVersion: z.literal(PROTOCOL_VERSION), queryId: z.string().min(1), itemId: z.string().min(1), methodName: z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/).optional(), targetRef: z.string().min(1).max(200).regex(/^[A-Za-z0-9_][A-Za-z0-9_./-]*$/).optional(), localSignature: z.string().min(1).max(4000).optional(), workingTree: z.boolean().optional(), phpVersion: z.string().regex(/^\d+\.\d+(?:\.\d+)?$/).optional(), includeHistory: z.boolean().optional() }).parse(await body(request));
+        response.writeHead(200, { "Content-Type": "application/x-ndjson", "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff" });
+        const emit = (value: unknown) => { if (!response.destroyed) response.write(`${JSON.stringify(value)}\n`); };
+        try { await methodImpact.analyze(parsed, requestAbort.signal, (result) => emit({ type: "result", result })); }
+        catch (error) { emit({ type: "error", message: error instanceof Error ? error.message : "Method analysis failed" }); }
+        response.end(); return;
+      }
       if (url.pathname === "/v1/history" && method === "POST") {
-        const parsed = z.object({ protocolVersion: z.literal(PROTOCOL_VERSION), symbolId: z.string() }).parse(await body(request)); const symbol = store.activeSymbols().find((item) => item.id === parsed.symbolId); if (!symbol) return json(response, 404, errorBody("NOT_FOUND", "Symbol not found")); const repository = store.repository(symbol.repositoryId); if (!repository) return json(response, 404, errorBody("NOT_FOUND", "Repository not found")); const events = await history.analyze(repository.root, symbol, AbortSignal.timeout(120_000)); return json(response, 200, { events: browserAuthenticated && !bearerAuthenticated ? events.map(historyWithoutSource) : events });
+        const parsed = z.object({ protocolVersion: z.literal(PROTOCOL_VERSION), symbolId: z.string(), queryId: z.string().optional() }).parse(await body(request)); const symbol = (parsed.queryId ? graphs.query(parsed.queryId).symbols : store.activeSymbols()).find((item) => item.id === parsed.symbolId); if (!symbol) return json(response, 404, errorBody("NOT_FOUND", "Symbol not found")); const repository = store.repository(symbol.repositoryId); if (!repository) return json(response, 404, errorBody("NOT_FOUND", "Repository not found")); const events = await history.analyze(repository.root, symbol, AbortSignal.timeout(120_000)); return json(response, 200, { events: browserAuthenticated && !bearerAuthenticated ? events.map(historyWithoutSource) : events });
       }
       if (url.pathname === "/v1/inclusion" && method === "POST") {
-        const parsed = z.object({ protocolVersion: z.literal(PROTOCOL_VERSION), symbolId: z.string().min(1), commit: z.string().min(1) }).parse(await body(request));
-        const symbols = store.activeSymbols();
+        const parsed = z.object({ protocolVersion: z.literal(PROTOCOL_VERSION), symbolId: z.string().min(1), commit: z.string().min(1), queryId: z.string().optional() }).parse(await body(request));
+        const symbols = parsed.queryId ? graphs.query(parsed.queryId).symbols : store.activeSymbols();
         const symbol = symbols.find((item) => item.id === parsed.symbolId);
         if (!symbol) return json(response, 404, errorBody("NOT_FOUND", "Symbol not found"));
         const repository = store.repository(symbol.repositoryId);
@@ -320,8 +359,14 @@ export async function startServer(options: ServerOptions): Promise<{ close: () =
       return json(response, 500, errorBody("INTERNAL", error instanceof Error ? error.message : "Internal error"));
     }
   });
+  const configuredRepositories = store.listRepositories().filter((repository) => !repository.automatic && (!repository.remoteUrl || !repository.defaultBranch));
   if (options.automaticScan !== false) indexer.start(store.listRepositories());
   await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(options.port, options.host, () => { server.off("error", reject); resolve(); }); });
+  // Metadata discovery must not hold browser authentication or health behind Git I/O.
+  void Promise.all(configuredRepositories.map(async (repository) => {
+    try { store.upsertRepository(await enrichRepository(repository)); }
+    catch { /* A missing or unavailable worktree must not prevent the companion starting. */ }
+  }));
   const address = server.address();
   const activePort = typeof address === "object" && address ? address.port : options.port;
   return { close: async () => { await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve())); await indexer.close(); store.close(); }, url: `http://${options.host}:${activePort}`, tokenPath, store };

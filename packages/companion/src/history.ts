@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import type { ActiveBehaviour, Evidence, HistoryEvent, InclusionState } from "@trace/contracts";
 import { GitRepository } from "./git.js";
-import type { IndexedSymbol, ParsedMethod } from "./model.js";
+import type { IndexedSymbol, ParsedMethod, ParsedType } from "./model.js";
 import { parsePhp } from "./php.js";
 import { TraceStore } from "./store.js";
 
@@ -12,6 +12,14 @@ const structuralContract = (method: ParsedMethod) => JSON.stringify({
   parameters: (method.parameters ?? []).map((parameter) => ({ byReference: parameter.byReference, variadic: parameter.variadic, type: parameter.type ?? parameter.docType })),
   returnType: method.returnType ?? method.docReturnType,
 });
+const typeRelationshipContract = (type: ParsedType) => JSON.stringify({ parent: type.parent, interfaces: type.interfaces, traits: type.traits });
+const typeSignatureContract = (type: ParsedType) => JSON.stringify({
+  kind: type.kind, abstract: type.abstract,
+  methods: type.methods.map((method) => ({ name: method.name, signature: method.signature, visibility: method.visibility, static: method.static, abstract: method.abstract })),
+});
+const typeImplementationContract = (type: ParsedType) => JSON.stringify(type.methods.map((method) => ({ name: method.name, fingerprint: method.implementationFingerprint })));
+const typeDocumentationContract = (type: ParsedType) => JSON.stringify({ description: type.description, details: type.documentationDetails, methods: type.methods.map((method) => ({ name: method.name, fingerprint: method.documentationFingerprint })) });
+const sourceForType = (source: string, type: ParsedType): string => source.split("\n").slice(Math.max(0, type.range.startLine - 1), type.range.endLine).join("\n");
 
 export class HistoryService {
   private readonly patchIds = new Map<string, string | undefined>();
@@ -19,9 +27,14 @@ export class HistoryService {
   constructor(private readonly store: TraceStore) {}
 
   async analyze(repositoryRoot: string, symbol: IndexedSymbol, signal?: AbortSignal, maxCommits = 1000): Promise<HistoryEvent[]> {
+    if (symbol.kind !== "method") return this.analyzeType(repositoryRoot, symbol, signal, maxCommits);
+    return this.analyzeMethod(repositoryRoot, symbol, signal, maxCommits);
+  }
+
+  private async analyzeMethod(repositoryRoot: string, symbol: IndexedSymbol, signal?: AbortSignal, maxCommits = 1000): Promise<HistoryEvent[]> {
     if (symbol.kind !== "method" || !symbol.classFqn || !symbol.memberName) throw new Error("History currently requires a method symbol");
     const git = new GitRepository(repositoryRoot);
-    const allCommits = await git.commitsForPath(symbol.path, maxCommits + 1);
+    const allCommits = await git.commitsForPath(symbol.path, maxCommits + 1, symbol.commit);
     const truncated = allCommits.length > maxCommits;
     const commits = allCommits.slice(0, maxCommits);
     type Observation = { meta: Awaited<ReturnType<GitRepository["commitsForPath"]>>[number]; path: string; method: ParsedMethod; moveFrom?: string; renameFrom?: string };
@@ -105,6 +118,58 @@ export class HistoryService {
         events.push(event);
       }
       previous = current;
+    }
+    this.store.replaceHistory(symbol.repositoryId, symbol.id, events);
+    return events;
+  }
+
+  private async analyzeType(repositoryRoot: string, symbol: IndexedSymbol, signal?: AbortSignal, maxCommits = 1000): Promise<HistoryEvent[]> {
+    if (!["class", "interface", "trait"].includes(symbol.kind)) throw new Error("History requires a class, interface, trait, or method symbol");
+    const git = new GitRepository(repositoryRoot);
+    const allCommits = await git.commitsForPath(symbol.path, maxCommits + 1, symbol.commit);
+    const truncated = allCommits.length > maxCommits;
+    const commits = allCommits.slice(0, maxCommits);
+    type Observation = { meta: Awaited<ReturnType<GitRepository["commitsForPath"]>>[number]; type: ParsedType; source: string };
+    const newestFirst: Observation[] = [];
+    for (const meta of commits) {
+      signal?.throwIfAborted();
+      const source = await git.show(meta.commit, symbol.path);
+      if (!source) continue;
+      try {
+        const type = parsePhp(source, symbol.path).types.find((candidate) => candidate.fqn.toLowerCase() === symbol.fqn.toLowerCase());
+        if (type) newestFirst.push({ meta, type, source: sourceForType(source, type) });
+      } catch { /* Historical parse gaps stay gaps instead of becoming fabricated events. */ }
+    }
+    const events: HistoryEvent[] = [];
+    let previous: Observation | undefined;
+    for (const observation of newestFirst.reverse()) {
+      signal?.throwIfAborted();
+      let category: HistoryEvent["category"] | undefined;
+      let summary = observation.meta.summary;
+      if (!previous) { category = "introduction"; summary = `Earliest observed ${observation.type.shortName}`; }
+      else if (typeRelationshipContract(observation.type) !== typeRelationshipContract(previous.type)) category = "relationship";
+      else if (typeSignatureContract(observation.type) !== typeSignatureContract(previous.type)) category = "signature";
+      else if (typeImplementationContract(observation.type) !== typeImplementationContract(previous.type)) category = "implementation";
+      else if (typeDocumentationContract(observation.type) !== typeDocumentationContract(previous.type)) category = "documentation";
+      else if (observation.source !== previous.source) category = "formatting";
+      if (category) events.push({
+        id: `history:${sha(`${symbol.id}:${observation.meta.commit}:${category}`)}`,
+        symbolId: symbol.id,
+        commit: observation.meta.commit,
+        ...(observation.meta.parents[0] ? { parentCommit: observation.meta.parents[0] } : {}),
+        category,
+        summary,
+        authorName: observation.meta.authorName,
+        authorEmail: observation.meta.authorEmail,
+        authoredAt: observation.meta.authoredAt,
+        ...(previous ? { beforeSource: previous.source } : {}),
+        afterSource: observation.source,
+        limitations: [
+          ...(commits.length < 2 ? ["History may be incomplete if this repository is shallow"] : []),
+          ...(truncated ? [`History traversal was bounded to ${maxCommits} commits`] : []),
+        ],
+      });
+      previous = observation;
     }
     this.store.replaceHistory(symbol.repositoryId, symbol.id, events);
     return events;

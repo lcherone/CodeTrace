@@ -5,6 +5,7 @@ import { promisify } from "node:util";
 const execFileAsync = promisify(execFile);
 
 export class GitRepository {
+  private static readonly sourceCache = new Map<string, string>();
   constructor(readonly root: string) {}
 
   private async git(args: string[], maxBuffer = 32 * 1024 * 1024): Promise<string> {
@@ -17,6 +18,20 @@ export class GitRepository {
     const branch = (await this.git(["branch", "--show-current"])).trim() || undefined;
     const dirty = Boolean((await this.git(["status", "--porcelain", "--untracked-files=no"])).trim());
     return { commit, ...(branch ? { branch } : {}), dirty };
+  }
+
+  async remoteUrl(): Promise<string | undefined> {
+    try { return (await this.git(["config", "--get", "remote.origin.url"])).trim() || undefined; }
+    catch { return undefined; }
+  }
+
+  async headIdentity(): Promise<{ commit: string; branch?: string }> {
+    const [commit, branch] = await Promise.all([
+      this.git(["rev-parse", "HEAD"]),
+      this.git(["branch", "--show-current"]),
+    ]);
+    const branchName = branch.trim() || undefined;
+    return { commit: commit.trim(), ...(branchName ? { branch: branchName } : {}) };
   }
 
   async resolveCommit(commit: string): Promise<string | undefined> {
@@ -70,12 +85,22 @@ export class GitRepository {
   }
 
   async show(commit: string, path: string): Promise<string | undefined> {
-    try { return await this.git(["show", `${commit}:${path}`]); } catch { return undefined; }
+    const immutable = /^[\da-f]{40}(?:[\da-f]{24})?$/i.test(commit);
+    const key = `${this.root}\0${commit}\0${path}`;
+    if (immutable && GitRepository.sourceCache.has(key)) return GitRepository.sourceCache.get(key);
+    try {
+      const source = await this.git(["show", `${commit}:${path}`]);
+      if (immutable && source.length <= 1_000_000) {
+        GitRepository.sourceCache.set(key, source);
+        if (GitRepository.sourceCache.size > 64) GitRepository.sourceCache.delete(GitRepository.sourceCache.keys().next().value ?? "");
+      }
+      return source;
+    } catch { return undefined; }
   }
 
-  async commitsForPath(path: string, limit = 1000): Promise<Array<{ commit: string; parents: string[]; authorName: string; authorEmail: string; authoredAt: string; summary: string }>> {
+  async commitsForPath(path: string, limit = 1000, revision = "HEAD"): Promise<Array<{ commit: string; parents: string[]; authorName: string; authorEmail: string; authoredAt: string; summary: string }>> {
     const format = "%H%x1f%P%x1f%an%x1f%ae%x1f%aI%x1f%s%x1e";
-    const output = await this.git(["log", "--follow", `--max-count=${limit}`, `--format=${format}`, "--", path]);
+    const output = await this.git(["log", "--follow", `--max-count=${limit}`, `--format=${format}`, revision, "--", path]);
     return output.split("\x1e").map((record) => record.trim()).filter(Boolean).map((record) => {
       const [commit = "", parents = "", authorName = "", authorEmail = "", authoredAt = "", summary = ""] = record.split("\x1f");
       return { commit, parents: parents.split(" ").filter(Boolean), authorName, authorEmail, authoredAt, summary };

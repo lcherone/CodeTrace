@@ -26,3 +26,21 @@ test("depth and pinned selection reveal connected context deterministically", ()
   const pinned = graphView(value, "focused", 2, "e3");
   assert.ok(pinned.nodes.some((item) => item.id === "two")); assert.ok(pinned.nodes.some((item) => item.id === "three"));
 });
+
+test("class focused view presents lineage and package consumers before declared methods", () => {
+  const focus: GraphNode = { id: "focus", kind: "class", label: "App\\Customer", metadata: {} };
+  const parent: GraphNode = { id: "parent", kind: "class", label: "Package\\Customer", metadata: { storyRole: "parent" } };
+  const pkg: GraphNode = { id: "package", kind: "package-revision", label: "vendor/package", metadata: { storyRole: "parent-package" } };
+  const project: GraphNode = { id: "project", kind: "project", label: "consumer", metadata: { storyRole: "consumer-project" } };
+  const method = node("method", "App\\Customer::save");
+  const value = graph([focus, parent, pkg, project, method], [
+    edge("parent-edge", "focus", "parent", "extends", "unresolved"),
+    edge("package-edge", "package", "parent", "declares", "unresolved"),
+    edge("consumer-edge", "project", "package", "requires", "dependency-only"),
+    edge("method-edge", "focus", "method", "declares"),
+  ]);
+  const view = graphView(value, "focused", 10);
+  assert.deepEqual(view.nodes.map((item) => item.id), ["focus", "parent", "package", "project"]);
+  assert.equal(view.edges.some((item) => item.id === "method-edge"), false);
+  assert.equal(graphView(value, "neighbours", 10).nodes.some((item) => item.id === "method"), true);
+});

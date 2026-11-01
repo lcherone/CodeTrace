@@ -1,0 +1,100 @@
+import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+import { promisify } from "node:util";
+import test from "node:test";
+import { ExplorationService } from "./exploration.js";
+import { GraphService } from "./graph.js";
+import { parsePhp } from "./php.js";
+import { resolveRelationships, symbolsFromFiles } from "./relationships.js";
+import { TraceStore } from "./store.js";
+import { HistoryService } from "./history.js";
+
+const exec = promisify(execFile);
+test("project, package, class and method exploration retains the trace and exact declaration evidence", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "trace-explorer-"));
+  const store = new TraceStore(":memory:");
+  try {
+    const head: Record<string, string> = {};
+    for (const [id, source] of [
+      ["shared", "<?php\nnamespace Core;\nclass BaseOrder {\n public function total(): int { return 1; }\n public function inherited(): bool { return true; }\n}\n"],
+      ["app", "<?php\nnamespace App;\nclass Order extends \\Core\\BaseOrder {\n public function total(): int { return parent::total(); }\n public function caller(): int { return $this->total(); }\n}\n"],
+    ] as const) {
+      const directory = path.join(root, id); await mkdir(path.join(directory, "src"), { recursive: true });
+      await exec("git", ["init", "-b", "main", directory]);
+      await exec("git", ["-C", directory, "config", "user.name", "Trace"]); await exec("git", ["-C", directory, "config", "user.email", "trace@example.test"]);
+      await writeFile(path.join(directory, "src/Order.php"), source);
+      await writeFile(path.join(directory, "composer.json"), JSON.stringify({ name: `example/${id}`, ...(id === "app" ? { require: { "example/shared": "1.0" } } : {}) }, null, 2));
+      if (id === "app") await writeFile(path.join(directory, "composer.lock"), JSON.stringify({ packages: [{ name: "example/shared", version: "1.0", source: { reference: head.shared } }] }, null, 2));
+      await exec("git", ["-C", directory, "add", "."]); await exec("git", ["-C", directory, "-c", "commit.gpgsign=false", "commit", "-m", "Initial"]);
+      const commit = (await exec("git", ["-C", directory, "rev-parse", "HEAD"])).stdout.trim(); head[id] = commit;
+      store.upsertRepository({ id, root: directory, remoteUrl: `git@github.com:Example/${id}.git` });
+      const generation = store.beginGeneration(id, commit, "main", false, 1);
+      const symbols = symbolsFromFiles(id, generation, commit, [parsePhp(source, "src/Order.php")]);
+      store.publishGeneration(generation, id, id, symbols, resolveRelationships(id, generation, commit, symbols), [{ repositoryId: id, generation, name: `example/${id}`, rootPath: "", sourceCommit: commit, autoload: {} }], id === "app" ? [{ repositoryId: id, generation, packageName: "example/shared", direct: true, development: false, resolvedVersion: "1.0", resolvedSourceCommit: head.shared!, indexedRevision: head.shared!, indexedRepositoryId: "shared", resolution: "exact", resolutionMethod: "package-name" }] : []);
+    }
+    const graphs = new GraphService(store); const explorer = new ExplorationService(store, graphs);
+    const selection = { repositoryPath: path.join(root, "app"), relativePath: "src/Order.php", revision: { repositoryId: "app", commit: head.app!, dirty: false }, range: { startLine: 3, startColumn: 0, endLine: 3, endColumn: 5 }, selectedText: "App\\Order" };
+    const initial = graphs.overview(selection);
+    const fastProject = await explorer.explore(initial.queryId, "project:app", undefined, true);
+    assert.equal(fastProject.focusNodeId, "project:app");
+    assert.equal(fastProject.freshness.partial, true);
+    assert.ok(fastProject.nodes.some((node) => node.label === "App\\Order::total"));
+    const project = await explorer.explore(initial.queryId, "project:app");
+    assert.ok(project.nodes.some((node) => node.label === "App\\Order"));
+    assert.ok(project.edges.some((edge) => edge.type === "inherits" && edge.label === "Inherits unchanged"));
+    assert.ok(project.edges.some((edge) => edge.type === "calls-parent"));
+    const method = project.nodes.find((node) => node.label === "App\\Order::total")!;
+    const methodGraph = await explorer.explore(project.queryId, method.id);
+    assert.equal(methodGraph.focusNodeId, method.id);
+    assert.ok(methodGraph.edges.some((edge) => edge.type === "calls" && edge.target === method.id));
+    const details = await explorer.details(methodGraph.queryId, method.id);
+    assert.ok(details.preview?.includes("return parent::total()"));
+    assert.ok(details.links[0]?.githubUrl?.includes(`/blob/${head.app}/src/Order.php#L4-L4`));
+    assert.ok(details.sections.some((section) => section.title === "Incoming calls"));
+    const current = await explorer.compatibility(methodGraph.queryId, method.id);
+    assert.equal(current.rows[0]?.current.state, "no-signature-incompatibility");
+    assert.equal(current.rows[0]?.target.state, "unknown");
+    await writeFile(path.join(root, "shared/src/Order.php"), "<?php namespace Core; class BaseOrder { public function total(): string { return 'changed'; } public function inherited(): bool { return true; } }");
+    await exec("git", ["-C", path.join(root, "shared"), "add", "."]); await exec("git", ["-C", path.join(root, "shared"), "-c", "commit.gpgsign=false", "commit", "-m", "Change return contract"]);
+    const proposed = (await exec("git", ["-C", path.join(root, "shared"), "rev-parse", "HEAD"])).stdout.trim();
+    const update = await explorer.compatibility(methodGraph.queryId, method.id, proposed);
+    assert.equal(update.rows[0]?.current.state, "no-signature-incompatibility");
+    assert.equal(update.rows[0]?.target.state, "incompatible");
+    assert.equal(update.rows[0]?.installedCommit, head.shared);
+    assert.equal(update.rows[0]?.targetCommit, proposed);
+    assert.ok(update.rows[0]?.links.some((link) => link.githubUrl?.includes(`/blob/${proposed}/`)));
+    const changedSource = await readFile(path.join(root, "shared/src/Order.php"), "utf8");
+    const newGeneration = store.beginGeneration("shared", proposed, "main", false, 1);
+    const newSymbols = symbolsFromFiles("shared", newGeneration, proposed, [parsePhp(changedSource, "src/Order.php")]);
+    store.publishGeneration(newGeneration, "shared", "proposed-index", newSymbols, resolveRelationships("shared", newGeneration, proposed, newSymbols), [{ repositoryId: "shared", generation: newGeneration, name: "example/shared", rootPath: "", sourceCommit: proposed, autoload: {} }], []);
+    const staleOverview = graphs.overview(selection);
+    const reconstructed = await explorer.explore(staleOverview.queryId, "project:app");
+    const installedParent = reconstructed.nodes.find((node) => node.label === "Core\\BaseOrder::total")!;
+    assert.equal(installedParent.occurrence?.revision.commit, head.shared);
+    assert.match(String(installedParent.metadata.signature), /: int/);
+    assert.match(String(installedParent.metadata.revisionContext), /exact locked Git revision/);
+    const parentGraph = await explorer.explore(reconstructed.queryId, installedParent.id);
+    assert.equal(parentGraph.focusNodeId, installedParent.id);
+    const parentSymbol = graphs.query(parentGraph.queryId).symbols.find((symbol) => symbol.id === installedParent.id)!;
+    const historicalEvents = await new HistoryService(store).analyze(path.join(root, "shared"), parentSymbol);
+    assert.equal(historicalEvents.some((event) => event.commit === proposed), false);
+    const dependency = methodGraph.edges.find((edge) => edge.type === "requires")!;
+    const dependencyDetails = await explorer.details(methodGraph.queryId, dependency.id);
+    assert.ok(dependencyDetails.links.some((link) => link.path === "composer.lock" && link.range!.startLine > 1 && link.githubUrl?.includes(`/blob/${head.app}/`)));
+    assert.equal(graphs.query(initial.queryId).response.focusNodeId, initial.focusNodeId);
+    await assert.rejects(explorer.details(initial.queryId, "not-in-query"), /not present/);
+    const overlay = graphs.overview({ ...selection, documentText: await readFile(path.join(root, "app/src/Order.php"), "utf8"), documentVersion: 1 });
+    const overlayDetails = await explorer.details(overlay.queryId, overlay.focusNodeId);
+    assert.equal(overlayDetails.links[0]?.githubUrl, undefined);
+    assert.ok(overlayDetails.links[0]?.vscodeUrl);
+    assert.match(overlayDetails.links[0]?.unavailable ?? "", /Unsaved local changes/);
+    assert.equal(overlayDetails.preview, undefined);
+    const dirtyBaseline = graphs.overview({ ...selection, revision: { ...selection.revision, dirty: true } });
+    const dirtyDetails = await explorer.details(dirtyBaseline.queryId, dirtyBaseline.focusNodeId);
+    assert.equal(dirtyDetails.links[0]?.githubUrl, undefined);
+    assert.match(dirtyDetails.links[0]?.unavailable ?? "", /Unsaved local changes/);
+  } finally { store.close(); await rm(root, { recursive: true, force: true }); }
+});

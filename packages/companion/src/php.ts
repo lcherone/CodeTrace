@@ -11,7 +11,7 @@ const engine = new Engine({
 });
 
 const sha = (value: string) => createHash("sha256").update(value).digest("hex");
-export const PHP_ANALYZER_VERSION = 6;
+export const PHP_ANALYZER_VERSION = 8;
 export const phpCacheKey = (source: string): string => sha(`${PHP_ANALYZER_VERSION}\0${source}`);
 const textName = (node: any): string => {
   if (typeof node === "string") return node;
@@ -133,16 +133,17 @@ function typeReference(
   const resolved = new Set<string>();
   const builtins = new Set<string>();
   let lateStatic = false;
+  const qualifiedAtoms = new Map<string, string>();
   for (const atom of atoms) {
     const lower = atom.toLowerCase();
     if (builtinTypes.has(lower) || lower === "array-key" || lower === "class-string" || lower === "list") {
       builtins.add(lower);
+      qualifiedAtoms.set(atom, lower);
       continue;
     }
-    if (lower === "self") resolved.add(classFqn);
-    else if (lower === "parent") { if (parentFqn) resolved.add(parentFqn); }
-    else if (lower === "static" || lower === "$this") { resolved.add(classFqn); lateStatic = true; }
-    else resolved.add(qualify(atom, namespace, imports));
+    const qualified = lower === "self" || lower === "static" || lower === "$this" ? classFqn : lower === "parent" ? parentFqn ?? "parent" : qualify(atom, namespace, imports);
+    resolved.add(qualified); qualifiedAtoms.set(atom, lower === "static" ? `static:${classFqn}` : qualified);
+    if (lower === "static" || lower === "$this") lateStatic = true;
   }
   return {
     declared: `${nullable && !clean.startsWith("?") ? "?" : ""}${clean}`,
@@ -152,7 +153,26 @@ function typeReference(
     composite: clean.includes("|") ? "union" : clean.includes("&") ? "intersection" : "named",
     nullable: nullable || clean.startsWith("?") || atoms.some((atom) => atom.toLowerCase() === "null"),
     lateStatic,
+    alternatives: nativeAlternatives(clean.replace(/^\?/, ""), qualifiedAtoms).concat(nullable || clean.startsWith("?") ? [["null"]] : []),
   };
+}
+
+function nativeAlternatives(expression: string, atoms: Map<string, string>): string[][] {
+  let value = expression.trim();
+  if (value.startsWith("(")) {
+    let depth = 0; let wraps = true;
+    for (let index = 0; index < value.length; index++) { if (value[index] === "(") depth++; if (value[index] === ")") depth--; if (!depth && index < value.length - 1) { wraps = false; break; } }
+    if (wraps) value = value.slice(1, -1);
+  }
+  const split = (operator: string) => {
+    const parts: string[] = []; let depth = 0; let start = 0;
+    for (let index = 0; index < value.length; index++) { if (value[index] === "(") depth++; if (value[index] === ")") depth--; if (!depth && value[index] === operator) { parts.push(value.slice(start, index)); start = index + 1; } }
+    parts.push(value.slice(start)); return parts;
+  };
+  const union = split("|"); if (union.length > 1) return union.flatMap((part) => nativeAlternatives(part, atoms)).slice(0, 32);
+  const intersection = split("&");
+  if (intersection.length > 1) return intersection.reduce<string[][]>((clauses, part) => clauses.flatMap((clause) => nativeAlternatives(part, atoms).map((other) => [...clause, ...other])).slice(0, 32), [[]]);
+  return [[atoms.get(value) ?? value]];
 }
 
 function nativeTypeReference(node: any, nullable: boolean, namespace: string, imports: Record<string, string>, classFqn: string, parentFqn?: string): ParsedTypeReference | undefined {
@@ -448,6 +468,7 @@ function parseMethod(node: AstNode, context: ReceiverContext): ParsedMethod {
       name: variableName,
       byReference: Boolean(parameter.byref),
       variadic: Boolean(parameter.variadic),
+      optional: Boolean(parameter.value || parameter.variadic),
       ...(type ? { type } : {}),
       ...(docType ? { docType } : {}),
       ...(documented?.description ? { description: documented.description } : {}),
@@ -489,6 +510,8 @@ function parseMethod(node: AstNode, context: ReceiverContext): ParsedMethod {
     visibility,
     static: Boolean(node.isStatic),
     abstract: Boolean(node.isAbstract || !node.body),
+    final: Boolean(node.isFinal),
+    returnsByReference: Boolean(node.byref),
     signature,
     source: methodSource,
     range: location(node),
@@ -564,11 +587,20 @@ export function parsePhp(source: string, path = "unknown.php"): ParsedFile {
     const interfaceNodes = Array.isArray(node.implements) ? node.implements : node.kind === "interface" && Array.isArray(node.extends) ? node.extends : [];
     const interfaces = interfaceNodes.map((item: any) => qualify(textName(item), namespace, imports));
     const traits: string[] = [];
+    const traitAdaptations: NonNullable<ParsedType["traitAdaptations"]> = [];
     const methods: ParsedMethod[] = [];
     const receiverContext = receiverContextForClass(node, fqn, parent, namespace, imports, source, methodReturns);
     for (const child of node.body ?? []) {
       if (child.kind === "method") methods.push(parseMethod(child, receiverContext));
-      if (child.kind === "traituse") for (const trait of child.traits ?? []) traits.push(qualify(textName(trait), namespace, imports));
+      if (child.kind === "traituse") {
+        for (const trait of child.traits ?? []) traits.push(qualify(textName(trait), namespace, imports));
+        for (const adaptation of child.adaptations ?? []) traitAdaptations.push({
+          ...(adaptation.trait ? { trait: qualify(textName(adaptation.trait), namespace, imports) } : {}), method: textName(adaptation.method),
+          ...(adaptation.instead ? { instead: adaptation.instead.map((item: any) => qualify(textName(item), namespace, imports)) } : {}),
+          ...(adaptation.as ? { alias: textName(adaptation.as) } : {}),
+          ...(["public", "protected", "private"].includes(adaptation.visibility) ? { visibility: adaptation.visibility } : {}),
+        });
+      }
     }
     types.push({
       id: `${kind}:${fqn.toLowerCase()}`,
@@ -576,9 +608,11 @@ export function parsePhp(source: string, path = "unknown.php"): ParsedFile {
       shortName,
       kind,
       abstract: Boolean(node.isAbstract),
+      final: Boolean(node.isFinal),
       ...(parent ? { parent } : {}),
       interfaces,
       traits,
+      traitAdaptations,
       ...(documentation.summary ? { description: documentation.summary } : {}),
       ...(documentation.details ? { documentationDetails: documentation.details } : {}),
       methods,
