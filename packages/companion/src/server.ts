@@ -3,10 +3,11 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import { chmod, mkdir, readFile, realpath, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { z } from "zod";
-import { CodeLensCountsRequestSchema, PROTOCOL_VERSION, SelectionSchema, TemporalGraphComparisonRequestSchema, type CompanionStatus } from "@trace/contracts";
+import { BrowserLaunchRequestSchema, CodeLensCountsRequestSchema, EditorContextUpdateRequestSchema, PROTOCOL_VERSION, SelectionSchema, TemporalGraphComparisonRequestSchema, type CompanionStatus, type GraphResponse, type HistoryEvent, type TemporalGraphComparisonResponse } from "@trace/contracts";
 import { CredentialStore } from "./credentials.js";
 import { sanitizeRepositoryUrl } from "./composer.js";
-import { dashboardHtml } from "./dashboard.js";
+import { adminDashboardHtml } from "./dashboard.js";
+import { BrowserSessionBroker, EditorContextHub } from "./browser-state.js";
 import { GitRepository } from "./git.js";
 import { GraphService } from "./graph.js";
 import { GitHubClient, parseGitHubRepository } from "./github.js";
@@ -39,6 +40,19 @@ function secureEqual(actual: string, expected: string): boolean {
   const a = createHash("sha256").update(actual).digest(); const b = createHash("sha256").update(expected).digest(); return timingSafeEqual(a, b);
 }
 
+function historyWithoutSource(event: HistoryEvent): HistoryEvent {
+  const { beforeSource: _beforeSource, afterSource: _afterSource, ...safe } = event;
+  return safe;
+}
+
+function graphWithoutSource(graph: GraphResponse): GraphResponse {
+  return { ...graph, history: graph.history.map(historyWithoutSource) };
+}
+
+function comparisonWithoutSource(comparison: TemporalGraphComparisonResponse): TemporalGraphComparisonResponse {
+  return { ...comparison, before: graphWithoutSource(comparison.before), after: graphWithoutSource(comparison.after) };
+}
+
 async function ensureToken(dataDirectory: string, supplied?: string): Promise<{ token: string; path: string }> {
   const tokenPath = path.join(dataDirectory, "client-token"); await mkdir(dataDirectory, { recursive: true, mode: 0o700 });
   if (supplied) return { token: supplied, path: tokenPath };
@@ -56,6 +70,15 @@ export async function startServer(options: ServerOptions): Promise<{ close: () =
   const temporalGraphs = new TemporalGraphService(store, graphs);
   const lensCounts = new LensCountService(store);
   const history = new HistoryService(store);
+  const browserSessions = new BrowserSessionBroker();
+  const editorContexts = new EditorContextHub();
+  const [browserHtml, browserBridge, browserScript, browserStyles, browserFont] = await Promise.all([
+    readFile(new URL("./browser/index.html", import.meta.url)),
+    readFile(new URL("./browser/bridge.js", import.meta.url)),
+    readFile(new URL("./browser/app.js", import.meta.url)),
+    readFile(new URL("./browser/app.css", import.meta.url)),
+    readFile(new URL("./browser/codicon.ttf", import.meta.url)),
+  ]);
   const started = Date.now();
   const server = createServer(async (request, response) => {
     const requestAbort = new AbortController();
@@ -65,23 +88,61 @@ export async function startServer(options: ServerOptions): Promise<{ close: () =
     const method = request.method ?? "GET";
     const origin = request.headers.origin;
     if (origin) {
-      const allowed = origin === `http://${options.host}:${options.port}` || origin === `http://localhost:${options.port}` || origin.startsWith("vscode-webview://") || origin.endsWith(".vscode-webview.net");
+      const address = server.address();
+      const activePort = typeof address === "object" && address ? address.port : options.port;
+      const allowed = origin === `http://127.0.0.1:${activePort}` || origin === `http://localhost:${activePort}` || origin === `http://[::1]:${activePort}` || origin.startsWith("vscode-webview://") || origin.endsWith(".vscode-webview.net");
       if (!allowed) return json(response, 403, errorBody("UNAUTHORIZED", "Origin is not allowed"));
       response.setHeader("Access-Control-Allow-Origin", origin); response.setHeader("Vary", "Origin"); response.setHeader("Access-Control-Allow-Headers", "Authorization, Content-Type, X-Trace-Protocol"); response.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
     }
     if (method === "OPTIONS") { response.writeHead(204); response.end(); return; }
     if (url.pathname === "/health") return json(response, 200, { service: "trace-companion", protocolVersion: PROTOCOL_VERSION, status: "ok" });
-    if (url.pathname === "/") { response.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store", "X-Frame-Options": "DENY", "X-Content-Type-Options": "nosniff" }); response.end(dashboardHtml); return; }
+    if (url.pathname === "/" && method === "GET" && url.searchParams.has("ticket")) {
+      const exchanged = browserSessions.exchange(url.searchParams.get("ticket") ?? "");
+      if (!exchanged) return json(response, 401, errorBody("UNAUTHORIZED", "Browser launch ticket is invalid, expired, or already used"));
+      response.writeHead(303, { Location: "/", "Set-Cookie": exchanged.cookie, "Cache-Control": "no-store", "Referrer-Policy": "no-referrer", "X-Frame-Options": "DENY", "X-Content-Type-Options": "nosniff" }); response.end(); return;
+    }
+    if (url.pathname === "/" && method === "GET") { const nonce = randomBytes(18).toString("base64url"); const html = browserHtml.toString("utf8").replaceAll("{{NONCE}}", nonce); const contentSecurityPolicy = `default-src 'none'; style-src 'self' 'nonce-${nonce}'; script-src 'self' 'nonce-${nonce}'; font-src 'self'; connect-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'`; response.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Content-Security-Policy": contentSecurityPolicy, "Cache-Control": "no-store", "Referrer-Policy": "no-referrer", "X-Frame-Options": "DENY", "X-Content-Type-Options": "nosniff" }); response.end(html); return; }
+    if (url.pathname === "/favicon.ico" && method === "GET") { response.writeHead(204, { "Cache-Control": "public,max-age=86400" }); response.end(); return; }
+    if (url.pathname === "/admin" && method === "GET") { response.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store", "Referrer-Policy": "no-referrer", "X-Frame-Options": "DENY", "X-Content-Type-Options": "nosniff" }); response.end(adminDashboardHtml); return; }
+    if (url.pathname === "/browser/app.js" && method === "GET") { response.writeHead(200, { "Content-Type": "text/javascript; charset=utf-8", "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff" }); response.end(browserScript); return; }
+    if (url.pathname === "/browser/bridge.js" && method === "GET") { response.writeHead(200, { "Content-Type": "text/javascript; charset=utf-8", "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff" }); response.end(browserBridge); return; }
+    if (url.pathname === "/browser/app.css" && method === "GET") { response.writeHead(200, { "Content-Type": "text/css; charset=utf-8", "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff" }); response.end(browserStyles); return; }
+    if (url.pathname === "/browser/codicon.ttf" && method === "GET") { response.writeHead(200, { "Content-Type": "font/ttf", "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff" }); response.end(browserFont); return; }
     if (!url.pathname.startsWith("/v1/")) return json(response, 404, errorBody("NOT_FOUND", "Route not found"));
     if (request.headers["x-trace-protocol"] !== PROTOCOL_VERSION) return json(response, 409, errorBody("PROTOCOL_MISMATCH", `Companion protocol ${PROTOCOL_VERSION} is required`));
+    const authorization = request.headers.authorization ?? "";
+    const bearerAuthenticated = authorization.startsWith("Bearer ") && secureEqual(authorization.slice(7), token);
+    const browserAuthenticated = browserSessions.authenticate(request.headers.cookie);
     const statusIsPublic = url.pathname === "/v1/status" && method === "GET";
     if (!statusIsPublic) {
-      const authorization = request.headers.authorization ?? "";
-      if (!authorization.startsWith("Bearer ") || !secureEqual(authorization.slice(7), token)) return json(response, 401, errorBody("UNAUTHORIZED", "A valid local client token is required"));
+      if (!bearerAuthenticated && !browserAuthenticated) return json(response, 401, errorBody("UNAUTHORIZED", "A valid local client token or browser session is required"));
     }
     if (["POST", "PUT", "DELETE"].includes(method) && request.headers["content-type"]?.split(";")[0] !== "application/json" && method !== "DELETE") return json(response, 415, errorBody("INVALID_REQUEST", "Mutation requests require application/json"));
 
     try {
+      if (url.pathname === "/v1/browser-launch" && method === "POST") {
+        BrowserLaunchRequestSchema.parse(await body(request));
+        const address = server.address();
+        const port = typeof address === "object" && address ? address.port : options.port;
+        const host = options.host === "::1" ? "[::1]" : options.host === "localhost" ? "localhost" : "127.0.0.1";
+        return json(response, 201, browserSessions.launch(`http://${host}:${port}`));
+      }
+      if (url.pathname === "/v1/editor-context" && method === "POST") {
+        const parsed = EditorContextUpdateRequestSchema.parse(await body(request));
+        if (parsed.context === null) return json(response, 200, editorContexts.publish(parsed.clientId, null));
+        const publishedContext = parsed.context;
+        const repository = store.listRepositories().find((item) => item.root === publishedContext.selection.repositoryPath);
+        if (!repository) return json(response, 404, errorBody("NOT_FOUND", "Editor repository is not configured"));
+        const basis = store.activeGenerationBasis(repository.id);
+        if (!basis) return json(response, 409, errorBody("CONFLICT", "Editor repository has no published generation"));
+        if (basis.commit !== publishedContext.selection.revision.commit) return json(response, 409, errorBody("CONFLICT", "Editor revision does not match the active indexed generation", { repositoryId: repository.id, indexedCommit: basis.commit, requestedCommit: publishedContext.selection.revision.commit }));
+        const context = { ...publishedContext, selection: { ...publishedContext.selection, revision: { ...publishedContext.selection.revision, repositoryId: repository.id } } };
+        return json(response, 200, editorContexts.publish(parsed.clientId, context, basis.generation));
+      }
+      if (url.pathname === "/v1/editor-context" && method === "GET") {
+        const parsed = z.object({ after: z.coerce.number().int().nonnegative().default(0), waitMs: z.coerce.number().int().min(0).max(25_000).default(0) }).parse(Object.fromEntries(url.searchParams));
+        return json(response, 200, await editorContexts.poll(parsed.after, parsed.waitMs, requestAbort.signal));
+      }
       if (url.pathname === "/v1/status" && method === "GET") {
         const scanner = indexer.snapshot();
         const active = scanner.active > 0 || scanner.queued > 0;
@@ -133,7 +194,7 @@ export async function startServer(options: ServerOptions): Promise<{ close: () =
         if (parsed.mode === "history") {
           const focus = store.activeSymbols().find((symbol) => symbol.id === graph.focusNodeId); if (focus) { await history.analyze(repository.root, focus, AbortSignal.timeout(120_000)); graph = await graphs.traceAsync(selection, parsed.mode, parsed.limit, requestAbort.signal); }
         }
-        return json(response, 200, graph);
+        return json(response, 200, browserAuthenticated && !bearerAuthenticated ? graphWithoutSource(graph) : graph);
       }
       if (url.pathname === "/v1/lenses/counts" && method === "POST") {
         const parsed = CodeLensCountsRequestSchema.parse(await body(request));
@@ -141,13 +202,14 @@ export async function startServer(options: ServerOptions): Promise<{ close: () =
       }
       if (url.pathname === "/v1/trace/compare" && method === "POST") {
         const parsed = TemporalGraphComparisonRequestSchema.parse(await body(request));
-        return json(response, 200, await temporalGraphs.compare(parsed, AbortSignal.timeout(120_000)));
+        const comparison = await temporalGraphs.compare(parsed, AbortSignal.timeout(120_000));
+        return json(response, 200, browserAuthenticated && !bearerAuthenticated ? comparisonWithoutSource(comparison) : comparison);
       }
       if (url.pathname === "/v1/graph/expand" && method === "POST") {
-        const parsed = z.object({ protocolVersion: z.literal(PROTOCOL_VERSION), queryId: z.string(), nodeId: z.string(), direction: z.enum(["in", "out", "both"]) }).parse(await body(request)); return json(response, 200, graphs.expand(parsed.queryId, parsed.nodeId, parsed.direction));
+        const parsed = z.object({ protocolVersion: z.literal(PROTOCOL_VERSION), queryId: z.string(), nodeId: z.string(), direction: z.enum(["in", "out", "both"]) }).parse(await body(request)); const expanded = graphs.expand(parsed.queryId, parsed.nodeId, parsed.direction); return json(response, 200, browserAuthenticated && !bearerAuthenticated ? graphWithoutSource(expanded) : expanded);
       }
       if (url.pathname === "/v1/history" && method === "POST") {
-        const parsed = z.object({ protocolVersion: z.literal(PROTOCOL_VERSION), symbolId: z.string() }).parse(await body(request)); const symbol = store.activeSymbols().find((item) => item.id === parsed.symbolId); if (!symbol) return json(response, 404, errorBody("NOT_FOUND", "Symbol not found")); const repository = store.repository(symbol.repositoryId); if (!repository) return json(response, 404, errorBody("NOT_FOUND", "Repository not found")); return json(response, 200, { events: await history.analyze(repository.root, symbol, AbortSignal.timeout(120_000)) });
+        const parsed = z.object({ protocolVersion: z.literal(PROTOCOL_VERSION), symbolId: z.string() }).parse(await body(request)); const symbol = store.activeSymbols().find((item) => item.id === parsed.symbolId); if (!symbol) return json(response, 404, errorBody("NOT_FOUND", "Symbol not found")); const repository = store.repository(symbol.repositoryId); if (!repository) return json(response, 404, errorBody("NOT_FOUND", "Repository not found")); const events = await history.analyze(repository.root, symbol, AbortSignal.timeout(120_000)); return json(response, 200, { events: browserAuthenticated && !bearerAuthenticated ? events.map(historyWithoutSource) : events });
       }
       if (url.pathname === "/v1/inclusion" && method === "POST") {
         const parsed = z.object({ protocolVersion: z.literal(PROTOCOL_VERSION), symbolId: z.string().min(1), commit: z.string().min(1) }).parse(await body(request));
@@ -241,6 +303,7 @@ export async function startServer(options: ServerOptions): Promise<{ close: () =
         return json(response, 200, { protocolVersion: PROTOCOL_VERSION, symbolId: symbol.id, commit: parsed.commit, releases, releaseAssessments, consumers, githubAssociations, limitations: ["Consumer state reflects indexed lock files, not production deployment", ...(allTags.length > assessedTags.length ? ["Release assessment was bounded to 500 tags"] : [])] });
       }
       if (url.pathname === "/v1/source" && method === "GET") {
+        if (browserAuthenticated && !bearerAuthenticated) return json(response, 403, errorBody("UNAUTHORIZED", "Source text is not exposed to browser sessions; use the indexed path and range in VS Code"));
         const repositoryId = url.searchParams.get("repositoryId") ?? ""; const relativePath = url.searchParams.get("path") ?? ""; const commit = url.searchParams.get("commit"); const repository = store.repository(repositoryId); if (!repository) return json(response, 404, errorBody("NOT_FOUND", "Repository not found"));
         if (path.isAbsolute(relativePath) || relativePath.split(/[\\/]/).includes("..")) return json(response, 400, errorBody("INVALID_REQUEST", "Source path must remain within the repository"));
         const source = commit ? await new GitRepository(repository.root).show(commit, relativePath) : await readFile(path.join(repository.root, relativePath), "utf8"); if (source === undefined) return json(response, 404, errorBody("NOT_FOUND", "Source revision not found")); return json(response, 200, { repositoryId, path: relativePath, commit: commit ?? null, source });

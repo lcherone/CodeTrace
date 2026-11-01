@@ -5,9 +5,9 @@
   "type": "module",
   "bin": { "trace-companion": "dist/main.js" },
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.json && node esbuild.browser.mjs",
     "check": "tsc -p tsconfig.json --noEmit",
-    "test": "node --test dist/**/*.test.js",
+    "test": "node --test dist/*.test.js dist/**/*.test.js",
     "bench": "npm run build && node dist/scanner.bench.js",
     "bench:lenses": "npm run build && node dist/lens-counts.bench.js",
     "dev": "node --watch --enable-source-maps dist/main.js",
@@ -16,7 +16,13 @@
   },
   "dependencies": {
     "@trace/contracts": "0.1.0",
+    "@vscode/codicons": "^0.0.46-24",
+    "cytoscape": "^3.33.1",
     "php-parser": "^3.2.5",
     "zod": "^4.1.12"
+  },
+  "devDependencies": {
+    "@types/cytoscape": "^3.21.9",
+    "esbuild": "^0.25.11"
   }
 }

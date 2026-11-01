@@ -1,8 +1,8 @@
 # Trace visual feature guide
 
-These captures come from the current built Trace webview and companion using deterministic fixture repositories. They contain no customer source, credentials, client tokens, personal data, or private remote URLs.
+These captures use deterministic fixture repositories. They contain no customer source, credentials, client tokens, personal data, or private remote URLs. The browser is the primary live relationship UI and uses the same graph/evidence renderer represented here.
 
-The primary webview captures use a 1380 × 749 CSS-pixel viewport. The compact capture uses 800 × 800. Screenshots show synthetic repository identities and intentionally fictional GitHub association data.
+The relationship captures use a 1380 × 749 CSS-pixel viewport. The compact capture uses 800 × 800. Screenshots show synthetic repository identities and intentionally fictional GitHub association data.
 
 ## Feature coverage
 
@@ -65,4 +65,4 @@ The authenticated loopback dashboard exposes repository generations, bounded sca
 
 ## Capture boundary
 
-The native CodeLens and automatic cursor-follow behaviours were verified through the extension tests and installed extension workflow, but no full-editor screenshot is committed here. The available full VS Code windows contained private workspace context, and fabricating a replacement would misrepresent the running application. Safe fixture procedures for CodeLens and cursor following are documented in the [manual verification guide](manual-verification.md#12-codelens-counts-and-query-benchmark) and [Extension Development Host tour](manual-verification.md#3-extension-development-host).
+The editor-context publisher and browser-follow behaviour are verified with fixture data rather than private workspace screenshots. Safe procedures are documented in the [manual verification guide](manual-verification.md#3-extension-development-host).

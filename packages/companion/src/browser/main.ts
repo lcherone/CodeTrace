@@ -1,12 +1,14 @@
 import cytoscape, { type Core, type EdgeSingular, type EventObject, type NodeSingular } from "cytoscape";
-import { ExtensionOutboundMessageSchema, type ExtensionOutboundMessage } from "../messages";
+import { ExtensionOutboundMessageSchema, type ExtensionOutboundMessage } from "./messages.js";
 import type { ChangeInclusionResponse, Evidence, GraphEdge, GraphNode, GraphResponse, HistoryEvent, RepositoryRevisionMap, TemporalGraphComparisonResponse } from "@trace/contracts";
-import { layeredGraphPositions } from "./layout";
-import { comparisonStates, comparisonView, defaultComparisonState, type ComparisonState, type ComparisonView } from "../comparison";
-import { presentAssessment, type InclusionAssessmentLike } from "../inclusionPresentation";
-import { composerMetadataKeys, composerResolutionFromMetadata, type ComposerResolutionPresentation } from "../composerPresentation";
-import { isAllowedGitHubUrl } from "../externalLinks";
-import { receiverAnalysisFromMetadata, receiverPrecisionMessage, type ReceiverAnalysisPresentation } from "../receiverPresentation";
+import { layeredGraphPositions } from "./layout.js";
+import { comparisonStates, comparisonView, defaultComparisonState, type ComparisonState, type ComparisonView } from "./comparison.js";
+import { presentAssessment, type InclusionAssessmentLike } from "./inclusionPresentation.js";
+import { composerMetadataKeys, composerResolutionFromMetadata, type ComposerResolutionPresentation } from "./composerPresentation.js";
+import { isAllowedGitHubUrl } from "./externalLinks.js";
+import { receiverAnalysisFromMetadata, receiverPrecisionMessage, type ReceiverAnalysisPresentation } from "./receiverPresentation.js";
+import { graphView, relationshipRank, type GraphDepth, type GraphView } from "./graphView.js";
+import { clampRelationshipRailWidth, relationshipRailWidthFromKey } from "./panelResize.js";
 
 type VscodeApi = { postMessage(message: unknown): void; getState(): unknown; setState(value: unknown): void };
 declare global { interface Window { acquireVsCodeApi?: () => VscodeApi; __TRACE_FIXTURE__?: ExtensionOutboundMessage; __TRACE_INITIAL_SELECTION__?: string } }
@@ -37,6 +39,16 @@ const restored = isRecord(restoredState) ? restoredState : {};
 let selectedId = typeof restored.selectedId === "string" ? restored.selectedId : undefined;
 let search = "";
 let confidence = "all";
+let graphDepth: GraphDepth = restored.graphDepth === "neighbours" || restored.graphDepth === "all" ? restored.graphDepth : "focused";
+let nodeLimit = typeof restored.nodeLimit === "number" && restored.nodeLimit > 0 ? restored.nodeLimit : 10;
+const relationshipRailStorageKey = "trace.relationshipRailWidth";
+const storedRelationshipRailWidth = Number.parseFloat(localStorage.getItem(relationshipRailStorageKey) ?? "");
+let relationshipRailWidth = typeof restored.relationshipRailWidth === "number" && Number.isFinite(restored.relationshipRailWidth)
+  ? restored.relationshipRailWidth
+  : Number.isFinite(storedRelationshipRailWidth) ? storedRelationshipRailWidth : undefined;
+let currentGraphView: GraphView | undefined;
+const treeVisibleLimits = new Map<string, number>();
+const treePreviewLimit = 8;
 const navigation: string[] = Array.isArray(restored.navigation) ? restored.navigation.filter((item): item is string => typeof item === "string").slice(-8) : [];
 let themeRefreshFrame: number | undefined;
 let graphResizeFrame: number | undefined;
@@ -74,29 +86,111 @@ const graphResizeObserver = new ResizeObserver(() => {
   graphResizeFrame = requestAnimationFrame(() => {
     graphResizeFrame = undefined;
     cy?.resize();
-    cy?.fit(undefined, 28);
+    fitReadableGraph();
     renderMinimap();
   });
 });
 graphResizeObserver.observe($("graph"));
 
+const workspace = $("workspace");
+const relationshipResizer = $("relationship-resizer");
+const relationshipPanel = $("relationships-panel");
+let activeResizePointer: number | undefined;
+let resizeStartX = 0;
+let resizeStartWidth = 0;
+
+function applyRelationshipRailWidth(requestedWidth: number, persist = false): void {
+  relationshipRailWidth = requestedWidth;
+  const width = clampRelationshipRailWidth(requestedWidth, workspace.getBoundingClientRect().width);
+  document.documentElement.style.setProperty("--rail-width", `${width}px`);
+  relationshipResizer.setAttribute("aria-valuenow", String(width));
+  relationshipResizer.setAttribute("aria-valuetext", `${width} pixels`);
+  if (persist) persistViewState();
+}
+
+applyRelationshipRailWidth(relationshipRailWidth ?? relationshipPanel.getBoundingClientRect().width);
+
+relationshipResizer.addEventListener("pointerdown", (event) => {
+  if (event.button !== 0) return;
+  event.preventDefault();
+  activeResizePointer = event.pointerId;
+  resizeStartX = event.clientX;
+  resizeStartWidth = relationshipPanel.getBoundingClientRect().width;
+  relationshipResizer.setPointerCapture(event.pointerId);
+  document.body.classList.add("resizing-rail");
+});
+relationshipResizer.addEventListener("pointermove", (event) => {
+  if (event.pointerId !== activeResizePointer) return;
+  applyRelationshipRailWidth(resizeStartWidth + event.clientX - resizeStartX);
+});
+const finishRelationshipResize = (event: PointerEvent): void => {
+  if (event.pointerId !== activeResizePointer) return;
+  activeResizePointer = undefined;
+  document.body.classList.remove("resizing-rail");
+  if (relationshipResizer.hasPointerCapture(event.pointerId)) relationshipResizer.releasePointerCapture(event.pointerId);
+  persistViewState();
+};
+relationshipResizer.addEventListener("pointerup", finishRelationshipResize);
+relationshipResizer.addEventListener("pointercancel", finishRelationshipResize);
+relationshipResizer.addEventListener("keydown", (event) => {
+  const width = relationshipRailWidthFromKey(event.key, relationshipPanel.getBoundingClientRect().width, workspace.getBoundingClientRect().width, event.shiftKey);
+  if (width === undefined) return;
+  event.preventDefault();
+  applyRelationshipRailWidth(width, true);
+});
+window.addEventListener("resize", () => {
+  if (relationshipRailWidth !== undefined) applyRelationshipRailWidth(relationshipRailWidth);
+});
+
 document.querySelectorAll<HTMLButtonElement>(".mode").forEach((button) => button.addEventListener("click", () => {
   if (button.dataset.mode) vscode.postMessage({ type: "changeMode", mode: button.dataset.mode });
 }));
-$("search").addEventListener("input", (event) => { search = (event.target as HTMLInputElement).value.toLocaleLowerCase(); applyFilters(); });
-$("confidence").addEventListener("change", (event) => { confidence = (event.target as HTMLSelectElement).value; applyFilters(); });
+$("search").addEventListener("input", (event) => { search = (event.target as HTMLInputElement).value.toLocaleLowerCase(); renderTree(); applyFilters(); });
+$("confidence").addEventListener("change", (event) => { confidence = (event.target as HTMLSelectElement).value; renderTree(); applyFilters(); });
 $("zoom-in").addEventListener("click", () => cy?.zoom({ level: Math.min(3, cy.zoom() * 1.18), renderedPosition: { x: cy.width() / 2, y: cy.height() / 2 } }));
 $("zoom-out").addEventListener("click", () => cy?.zoom({ level: Math.max(0.2, cy.zoom() / 1.18), renderedPosition: { x: cy.width() / 2, y: cy.height() / 2 } }));
-$("fit").addEventListener("click", () => cy?.fit(undefined, 28));
+$("fit").addEventListener("click", fitReadableGraph);
+document.querySelectorAll<HTMLButtonElement>("[data-depth]").forEach((button) => button.addEventListener("click", () => {
+  const nextDepth = button.dataset.depth;
+  if (nextDepth !== "focused" && nextDepth !== "neighbours" && nextDepth !== "all") return;
+  graphDepth = nextDepth;
+  persistViewState();
+  renderGraph();
+}));
+$<HTMLSelectElement>("node-limit").value = Number.isFinite(nodeLimit) ? String(nodeLimit) : "Infinity";
+$("node-limit").addEventListener("change", (event) => {
+  const value = (event.target as HTMLSelectElement).value;
+  nodeLimit = value === "Infinity" ? Number.POSITIVE_INFINITY : Number.parseInt(value, 10);
+  persistViewState();
+  renderGraph();
+});
+$("show-more-graph").addEventListener("click", () => {
+  if (graphDepth === "focused") graphDepth = "neighbours";
+  else if (graphDepth === "neighbours") graphDepth = "all";
+  else if (Number.isFinite(nodeLimit)) nodeLimit = [18, 36, 72, 144].find((limit) => limit > nodeLimit) ?? Number.POSITIVE_INFINITY;
+  else return;
+  $<HTMLSelectElement>("node-limit").value = Number.isFinite(nodeLimit) ? String(nodeLimit) : "Infinity";
+  persistViewState();
+  renderGraph();
+});
 $("focus-search").addEventListener("click", () => $("search").focus());
 $("open-comparison").addEventListener("click", openComparisonEditor);
 $("open-comparison-mobile").addEventListener("click", openComparisonEditor);
 $("cancel-comparison").addEventListener("click", closeComparisonEditor);
 $("close-comparison").addEventListener("click", exitComparison);
 $<HTMLFormElement>("comparison-form").addEventListener("submit", submitComparison);
-$<HTMLCanvasElement>("graph-minimap").addEventListener("click", () => cy?.fit(undefined, 28));
+$<HTMLCanvasElement>("graph-minimap").addEventListener("click", fitReadableGraph);
 $("toggle-relationships").addEventListener("click", () => togglePanel("rail-open", "toggle-relationships"));
 $("toggle-details").addEventListener("click", () => togglePanel("inspector-open", "toggle-details"));
+$("close-relationships").addEventListener("click", () => closePanel("rail-open", "toggle-relationships"));
+$("close-details").addEventListener("click", () => closePanel("inspector-open", "toggle-details"));
+$("toggle-history").addEventListener("click", () => {
+  const panel = $("history-panel");
+  const expanded = panel.classList.toggle("expanded");
+  $("toggle-history").setAttribute("aria-expanded", String(expanded));
+  $("toggle-history").querySelector(".codicon")?.classList.toggle("codicon-chevron-down", expanded);
+  $("toggle-history").querySelector(".codicon")?.classList.toggle("codicon-chevron-up", !expanded);
+});
 window.addEventListener("keydown", (event) => {
   if (event.key !== "Escape") return;
   if (!$("comparison-editor").hidden) {
@@ -120,8 +214,17 @@ function handleMessage(raw: unknown): void {
     normalGraph = message.graph;
     render(message.graph);
   }
+  if (message.type === "context") {
+    const label = `${message.relativePath}:${message.line}`;
+    $("context-symbol").textContent = label;
+    $("context-symbol").title = label;
+  }
   if (message.type === "loading") showCanvasState(message.message, "loading");
-  if (message.type === "error") showToast(message.detail ? `${message.message} ${message.detail}` : message.message, true);
+  if (message.type === "error") {
+    const detail = message.detail ? `${message.message} ${message.detail}` : message.message;
+    if (message.trace) showCanvasState(detail, "error");
+    showToast(detail, true);
+  }
   if (message.type === "inclusion") renderInclusion(message.eventId, message.result);
   if (message.type === "comparison") renderComparison(message.result);
 }
@@ -138,7 +241,11 @@ function render(next: GraphResponse, preserveComparison = false): void {
   renderStatus();
   renderLegend();
   const focus = next.nodes.find((node) => node.id === next.focusNodeId);
-  if (focus && !(($("search") as HTMLInputElement).value)) ($("search") as HTMLInputElement).placeholder = focus.label;
+  if (focus) {
+    $("context-symbol").textContent = focus.label;
+    $("context-symbol").title = focus.label;
+    if (!(($("search") as HTMLInputElement).value)) ($("search") as HTMLInputElement).placeholder = focus.label;
+  }
   const preservedSelection = selectedId && (next.nodes.some((node) => node.id === selectedId) || next.edges.some((edge) => edge.id === selectedId)) ? selectedId : undefined;
   selectElement(preservedSelection ?? (window.__TRACE_INITIAL_SELECTION__ && next.edges.some((edge) => edge.id === window.__TRACE_INITIAL_SELECTION__) ? window.__TRACE_INITIAL_SELECTION__ : next.focusNodeId), false);
   renderBreadcrumbs();
@@ -254,12 +361,14 @@ function renderGraph(
   previousViewport?: { zoom: number; pan: { x: number; y: number } },
 ): void {
   if (!graph) return;
-  const nextLayoutKey = graphLayoutKey(graph);
+  currentGraphView = graphView(graph, graphDepth, nodeLimit, selectedId);
+  const visibleGraph: GraphResponse = { ...graph, nodes: currentGraphView.nodes, edges: currentGraphView.edges };
+  const nextLayoutKey = graphLayoutKey(visibleGraph);
   const layoutChanged = nextLayoutKey !== renderedLayoutKey;
   cy?.destroy();
   const elements = [
-    ...graph.nodes.map((node) => ({ data: { id: node.id, label: `${kindGlyph(node.kind)}  ${graphLabel(node.label)}${node.subtitle ? `\n${node.subtitle}` : ""}`, fullLabel: node.label, subtitle: node.subtitle ?? "", kind: node.kind, focused: Boolean(node.focused || node.id === graph?.focusNodeId), changeState: currentComparisonView?.nodeStates.get(node.id) ?? "" } })),
-    ...graph.edges.map((edge) => {
+    ...visibleGraph.nodes.map((node) => ({ data: { id: node.id, label: `${kindGlyph(node.kind)}  ${graphLabel(node.label)}${node.subtitle ? `\n${node.subtitle}` : ""}`, fullLabel: node.label, subtitle: node.subtitle ?? "", kind: node.kind, focused: Boolean(node.focused || node.id === graph?.focusNodeId), changeState: currentComparisonView?.nodeStates.get(node.id) ?? "" } })),
+    ...visibleGraph.edges.map((edge) => {
       const changeState = currentComparisonView?.edgeStates.get(edge.id);
       return { data: { id: edge.id, source: edge.source, target: edge.target, label: `${edge.label}${changeState ? ` · ${humanize(changeState)}` : ""}`, type: edge.type, confidence: edge.confidence, changeState: changeState ?? "" } };
     }),
@@ -317,13 +426,13 @@ function renderGraph(
       { selector: ".dimmed", style: { opacity: 0.16 } },
     ],
   });
-  const positions = layeredGraphPositions(graph.nodes, graph.edges, graph.focusNodeId);
+  const positions = layeredGraphPositions(visibleGraph.nodes, visibleGraph.edges, graph.focusNodeId);
   cy.nodes().forEach((node) => {
     const position = positions.get(node.id());
     if (position) node.position({ x: position.x, y: position.y });
   });
   if (layoutChanged || !previousViewport) {
-    cy.fit(undefined, 28);
+    fitReadableGraph();
   } else if (previousViewport) {
     cy.zoom(previousViewport.zoom);
     cy.pan(previousViewport.pan);
@@ -335,7 +444,39 @@ function renderGraph(
   cy.on("pan zoom position", renderMinimap);
   if (selectedId) cy.getElementById(selectedId).select();
   renderMinimap();
+  renderViewControls();
   applyFilters();
+}
+
+function fitReadableGraph(): void {
+  if (!cy) return;
+  cy.fit(undefined, 34);
+  if (cy.zoom() >= 0.58) return;
+  cy.zoom(0.58);
+  const focus = graph ? cy.getElementById(graph.focusNodeId) : undefined;
+  if (focus && !focus.empty()) cy.center(focus);
+}
+
+function renderViewControls(): void {
+  if (!graph || !currentGraphView) return;
+  document.querySelectorAll<HTMLButtonElement>("[data-depth]").forEach((button) => {
+    const active = button.dataset.depth === graphDepth;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-pressed", String(active));
+  });
+  const visibleRelationships = currentGraphView.edges.length;
+  $("visible-count").textContent = `${visibleRelationships} shown`;
+  $("total-count").textContent = `${graph.edges.length} relationship${graph.edges.length === 1 ? "" : "s"}`;
+  const hidden = currentGraphView.hiddenNodeCount || currentGraphView.hiddenEdgeCount;
+  const showMore = $("show-more-graph");
+  showMore.hidden = !hidden;
+  showMore.textContent = hidden ? `${currentGraphView.hiddenNodeCount} nodes · ${currentGraphView.hiddenEdgeCount} links hidden` : "";
+  showMore.title = graphDepth === "all" ? "Increase the visible node cap" : `Show ${graphDepth === "focused" ? "neighbouring" : "all"} relationships`;
+}
+
+function persistViewState(): void {
+  vscode.setState({ selectedId, navigation, graphDepth, nodeLimit, relationshipRailWidth });
+  if (relationshipRailWidth !== undefined) localStorage.setItem(relationshipRailStorageKey, String(relationshipRailWidth));
 }
 
 function graphLayoutKey(value: GraphResponse): string {
@@ -399,7 +540,7 @@ function renderTree(): void {
   const focus = graph.nodes.find((node) => node.id === graph?.focusNodeId);
   if (focus) {
     const focusButton = document.createElement("button");
-    focusButton.className = "tree-focus selected";
+    focusButton.className = `tree-focus${selectedId === focus.id ? " selected" : ""}`;
     focusButton.dataset.id = focus.id;
     focusButton.innerHTML = `${icon(kindIcon(focus.kind), "type-accent")}<strong>${escapeHtml(focus.label)}</strong><span>${graph.edges.length}</span>`;
     focusButton.addEventListener("click", () => selectElement(focus.id, true));
@@ -412,14 +553,24 @@ function renderTree(): void {
     grouped.set(edge.type, list);
   }
   $("relationship-count").textContent = String(graph.edges.length);
-  for (const [type, edges] of grouped) {
+  for (const [type, edges] of [...grouped.entries()].sort(([left], [right]) => relationshipRank(left) - relationshipRank(right) || left.localeCompare(right))) {
+    const matchingEdges = edges
+      .slice()
+      .sort((left, right) => left.confidence.localeCompare(right.confidence) || left.label.localeCompare(right.label))
+      .filter((edge) => {
+        const otherId = edge.source === graph?.focusNodeId ? edge.target : edge.source;
+        const node = graph?.nodes.find((candidate) => candidate.id === otherId);
+        return (confidence === "all" || edge.confidence === confidence)
+          && (!search || `${node?.label ?? ""} ${edge.label}`.toLocaleLowerCase().includes(search));
+      });
+    if (!matchingEdges.length) continue;
     const section = document.createElement("section");
     section.className = "tree-group";
     const heading = document.createElement("button");
     heading.className = "tree-heading";
     const initiallyExpanded = !["parameter-type", "return-type", "late-static-binding"].includes(type);
     heading.setAttribute("aria-expanded", String(initiallyExpanded));
-    heading.innerHTML = `${icon(initiallyExpanded ? "chevron-down" : "chevron-right", "tree-chevron")}${icon(relationshipIcon(type), `relationship-icon ${type}`)}<strong>${escapeHtml(humanize(type))}</strong><span>${edges.length}</span>`;
+    heading.innerHTML = `${icon(initiallyExpanded ? "chevron-down" : "chevron-right", "tree-chevron")}${icon(relationshipIcon(type), `relationship-icon ${type}`)}<strong>${escapeHtml(humanize(type))}</strong><span>${matchingEdges.length}</span>`;
     const list = document.createElement("div");
     list.className = "tree-children";
     list.hidden = !initiallyExpanded;
@@ -431,18 +582,36 @@ function renderTree(): void {
       chevron?.classList.toggle("codicon-chevron-down", hidden);
       chevron?.classList.toggle("codicon-chevron-right", !hidden);
     });
-    for (const edge of edges) {
+    const visibleLimit = treeVisibleLimits.get(type) ?? treePreviewLimit;
+    for (const [edgeIndex, edge] of matchingEdges.slice(0, visibleLimit).entries()) {
       const otherId = edge.source === graph.focusNodeId ? edge.target : edge.source;
       const node = graph.nodes.find((candidate) => candidate.id === otherId);
       const button = document.createElement("button");
-      button.className = "tree-item";
+      button.className = `tree-item${selectedId === edge.id ? " selected" : ""}`;
       button.dataset.id = edge.id;
+      button.dataset.type = type;
+      button.dataset.index = String(edgeIndex);
+      button.dataset.confidence = edge.confidence;
+      button.dataset.search = `${node?.label ?? ""} ${edge.label}`.toLocaleLowerCase();
       const changeState = currentComparisonView?.edgeStates.get(edge.id);
       button.setAttribute("aria-label", `${node?.label ?? edge.label}, ${changeState ? `${humanize(changeState)} relationship` : `${humanize(edge.confidence)} confidence`}`);
       button.innerHTML = `${icon(kindIcon(node?.kind ?? "method"), `type-icon ${node?.kind ?? "method"}`)}<span>${escapeHtml(node?.label ?? edge.label)}</span>${changeState ? `<em class="change-label ${changeState}">${escapeHtml(humanize(changeState))}</em>` : `<em class="confidence-mini ${edge.confidence}" title="${escapeHtml(edge.confidence)}"></em>`}`;
       button.addEventListener("click", () => selectElement(edge.id, true));
       list.append(button);
     }
+    const more = document.createElement("button");
+    more.className = "tree-more";
+    more.dataset.type = type;
+    const remaining = Math.max(0, matchingEdges.length - visibleLimit);
+    more.hidden = matchingEdges.length <= treePreviewLimit;
+    more.innerHTML = remaining
+      ? `${icon("ellipsis")} Show ${Math.min(50, remaining)} more`
+      : `${icon("chevron-up")} Show fewer`;
+    more.addEventListener("click", () => {
+      treeVisibleLimits.set(type, remaining ? visibleLimit + Math.min(50, remaining) : treePreviewLimit);
+      renderTree();
+    });
+    list.append(more);
     section.append(heading, list);
     root.append(section);
   }
@@ -451,6 +620,9 @@ function renderTree(): void {
 function selectElement(id: string, addHistory: boolean): void {
   if (!graph || !cy) return;
   selectedId = id;
+  if (cy.getElementById(id).empty() && (graph.nodes.some((candidate) => candidate.id === id) || graph.edges.some((candidate) => candidate.id === id))) {
+    renderGraph();
+  }
   cy.elements().unselect();
   cy.getElementById(id).select();
   document.querySelectorAll<HTMLElement>("[data-id]").forEach((element) => element.classList.toggle("selected", element.dataset.id === id));
@@ -462,7 +634,7 @@ function selectElement(id: string, addHistory: boolean): void {
     if (navigation.at(-1) !== id) navigation.push(id);
     if (navigation.length > 8) navigation.shift();
     renderBreadcrumbs();
-    vscode.setState({ selectedId: id, navigation });
+    persistViewState();
   }
 }
 
@@ -483,6 +655,12 @@ function togglePanel(className: "rail-open" | "inspector-open", buttonId: "toggl
   document.body.classList.toggle(className, open);
   $(buttonId).setAttribute("aria-expanded", String(open));
   otherButton.setAttribute("aria-expanded", "false");
+}
+
+function closePanel(className: "rail-open" | "inspector-open", buttonId: "toggle-relationships" | "toggle-details"): void {
+  document.body.classList.remove(className);
+  $(buttonId).setAttribute("aria-expanded", "false");
+  $(buttonId).focus();
 }
 
 function renderNodeDetails(node: GraphNode): void {
@@ -789,6 +967,8 @@ function renderStatus(): void {
   $("partial-status").textContent = graph.freshness.partial ? "Partial" : "Index up to date";
   $("partial-status").title = graph.freshness.partial ? graph.freshness.limitations.join(" · ") : `Indexed ${new Date(graph.freshness.indexedAt).toLocaleString()}`;
   $("partial-status").className = graph.freshness.partial ? "partial" : "complete";
+  $("context-partial").textContent = graph.freshness.partial ? "Partial" : "Up to date";
+  $("context-partial").className = `context-partial ${graph.freshness.partial ? "partial" : "complete"}`;
 }
 
 function renderLegend(): void {
@@ -808,7 +988,7 @@ function renderBreadcrumbs(): void {
 function applyFilters(): void {
   if (!cy || !graph) return;
   cy.elements().removeClass("filtered dimmed");
-  for (const edge of graph.edges) {
+  for (const edge of currentGraphView?.edges ?? graph.edges) {
     if (confidence !== "all" && edge.confidence !== confidence) cy.getElementById(edge.id).addClass("filtered");
   }
   if (search) {
@@ -820,21 +1000,6 @@ function applyFilters(): void {
   }
   const visibleEdges = cy.edges().filter((edge: EdgeSingular) => !edge.hasClass("filtered"));
   cy.nodes().forEach((node) => { node.toggleClass("filtered", node.id() !== graph?.focusNodeId && visibleEdges.connectedNodes().filter(`#${cssEscape(node.id())}`).length === 0 && confidence !== "all"); });
-  document.querySelectorAll<HTMLElement>(".tree-group").forEach((group) => {
-    let visible = 0;
-    group.querySelectorAll<HTMLButtonElement>(".tree-item").forEach((item) => {
-      const edge = graph?.edges.find((candidate) => candidate.id === item.dataset.id);
-      const otherId = edge ? edge.source === graph?.focusNodeId ? edge.target : edge.source : undefined;
-      const node = graph?.nodes.find((candidate) => candidate.id === otherId);
-      const matchesConfidence = Boolean(edge) && (confidence === "all" || edge?.confidence === confidence);
-      const matchesSearch = !search || `${node?.label ?? ""} ${edge?.label ?? ""}`.toLocaleLowerCase().includes(search);
-      item.hidden = !(matchesConfidence && matchesSearch);
-      if (!item.hidden) visible += 1;
-    });
-    group.hidden = visible === 0;
-    const count = group.querySelector<HTMLElement>(".tree-heading span:last-child");
-    if (count) count.textContent = String(visible);
-  });
 }
 
 function showCanvasState(message: string, kind: string): void {

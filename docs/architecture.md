@@ -5,17 +5,17 @@
 Trace is a small npm-workspace monorepo with one long-running local companion rather than a fleet of services.
 
 ```text
-VS Code editor
-  selection + unsaved overlay
-           │ versioned authenticated HTTP
+VS Code extension
+  workspace discovery + scan status + active editor position/revision
+           │ versioned authenticated loopback HTTP (no source text)
            ▼
-Node.js companion (loopback only)
+Node.js companion
   repository adapters → PHP/Composer indexer → SQLite generation
            │                         │
            ├─ graph/history queries  └─ isolated remote cache
            ▼
-VS Code webview
-  graph + accessible tree + evidence + timeline
+Authenticated browser UI
+  graph + relationship tree + evidence + timeline
 ```
 
 ### `@trace/contracts`
@@ -24,15 +24,15 @@ Runtime-validated contracts distinguish a logical symbol, an occurrence at a rep
 
 ### `@trace/companion`
 
-The companion owns GitHub credentials, repository discovery, Git operations, Composer resolution, PHP parsing, indexing, persistence, history, inclusion queries, jobs, and the management dashboard. Multiple VS Code windows may share it. It remains running when an editor window closes.
+The companion owns GitHub credentials, Git operations, Composer resolution, PHP parsing, indexing, persistence, history, inclusion queries, jobs, browser sessions, and the primary browser UI. Multiple VS Code windows may share it. It remains running when an editor window closes.
 
 HTTP binds to loopback. The protocol-checked status probe exposes no repository data; repository, index, graph, source and mutation routes require a bearer token. Repository, ref, and path data are passed to process APIs as arguments rather than interpolated into shell commands. Local worktrees are read-only inputs; remote caches are separate directories.
 
 ### `trace-vscode`
 
-The extension captures selection/cursor/repository context, supplies a selected-file overlay for unsaved changes, calls the companion, renders the graph, and navigates to source. Historical content uses a read-only virtual document. The extension host does not enumerate every repository or perform history scans.
+The extension discovers eligible workspace repositories, publishes scanner status, retains settings and the client token, and publishes the active local PHP editor context. The browser context is deliberately narrower than a trace selection: repository root/identity, relative path, exact indexed commit, dirty flag, selected word range, a validated PHP identifier hint, and a bounded light/dark/high-contrast theme kind only. Import aliases are resolved locally to their fully qualified identifier before publication. It omits raw selected-text contents, document text and document version. Unsupported editors publish a cleared context, and rapid cursor/editor changes cancel stale resolution and publication.
 
-The webview uses local bundled assets, a restrictive content security policy, validated messages, VS Code theme tokens, and an accessible list synchronized with the visual graph.
+Status and legacy exploration commands request a short-lived, single-use launch ticket over authenticated loopback HTTP, validate that its URL remains on the configured loopback origin, and open the primary browser UI. The ticket is exchanged once for an HttpOnly, SameSite session cookie. The browser polls the current context and requests graphs from published index generations; graph responses exposed to it omit before/after source bodies. Repository paths, symbol labels, evidence details and revision metadata remain potentially sensitive local data even without source text.
 
 ### `@trace/fixtures`
 
@@ -60,7 +60,7 @@ Files are cached by versioned content fingerprint. An unchanged inventory reuses
 
 CodeLens counts use a separate, bounded read cache. One request contains at most 200 items for one exact active repository commit. A generation-wide snapshot indexes symbols by path and pre-aggregates distinct callers plus exact Composer consumer repositories; per-symbol values are then cached. Cache identity includes every active generation ID and package mappings, so publication or mapping changes rebuild the snapshot and clear item values. Responses carry the requested repository generation/commit and distinguish callers from consumers. Snapshot database reads and item processing yield for cancellation, and a disconnected HTTP request aborts remaining work.
 
-The extension requests one batch per saved local-workspace PHP document with no additional delay by default because VS Code already coalesces provider requests. A configurable delay remains available for noisy hosts. It limits documents to 120 symbols by default (hard maximum 200) and caches responses by document version, repository ID/commit and response generation. Edits cancel outstanding requests and remove lenses immediately; a save keeps lenses suppressed until the refreshed scan generation is ready. Repository generation changes clear extension-side cache entries. Lens commands carry the original URI and symbol position so navigation does not depend on the active cursor at click time.
+The `/v1/lenses/counts` cache remains a bounded companion API and benchmark surface, but the browser-primary extension does not register a CodeLens provider or contribute CodeLens settings. Active editor publication is independently debounced by `trace.followDelayMs` and cancelled when superseded.
 
 Repository work enters a bounded scheduler with separate repository and global file-analysis concurrency. Duplicate requests coalesce, filesystem changes are debounced, automatic Composer discovery waits for capacity, cancellation propagates to analysis slots, and job snapshots/stages are persisted for diagnosis. Composer expansion is limited to packages that are both locked and installed; GitHub discovery alone never authorizes indexing. Completed generations publish atomically, interrupted jobs are marked failed on restart, and history remains lazy. Operational details and the anonymized load harness are documented in [large-workspace scanning, queues and privacy](performance-privacy.md).
 

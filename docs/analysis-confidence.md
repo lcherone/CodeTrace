@@ -76,12 +76,12 @@ Stable patch identity is textual evidence, not semantic proof; changed surroundi
 
 GitHub associations do not strengthen local Git inclusion beyond their own evidence. A pull request is confirmed only as an association returned for the exact repository and commit; it is not thereby confirmed merged. A release association is possible evidence that same-tag-name release metadata exists; the exact local tag commit remains the assessment basis, while remote tag object/commit equality is not independently verified. It is not deployment proof. Missing credentials, unsupported hosts, bounded pages/tags, timeouts, rate limits and per-request failures are reported as association limitations. Local inclusion remains usable, and partial GitHub success remains visible, when another association lookup fails.
 
-## CodeLens count semantics
+## Bounded count API semantics
 
-CodeLens callers are distinct indexed `calls`/`calls-parent` source symbols for the exact active generation. Package consumers are distinct repositories whose Composer dependency resolves exactly to the indexed package/revision. They are separate counts: dependency is not a call, and a call does not prove deployment or runtime execution. Ambiguous, declared-only, unavailable or revision-mismatched dependencies are excluded and make the consumer count partial with a limitation. A missing/ambiguous symbol range is also partial rather than silently counted as zero.
+The companion's bounded count API reports distinct indexed `calls`/`calls-parent` source symbols for the exact active generation. Package consumers are distinct repositories whose Composer dependency resolves exactly to the indexed package/revision. They are separate counts: dependency is not a call, and a call does not prove deployment or runtime execution. Ambiguous, declared-only, unavailable or revision-mismatched dependencies are excluded and make the consumer count partial with a limitation. A missing/ambiguous symbol range is also partial rather than silently counted as zero. The browser-primary extension does not currently render these values as CodeLens.
 
-Requests are accepted only for the active repository commit and responses carry its generation. Editing suppresses lenses until a saved document has a refreshed ready generation. Cached values improve latency but do not widen evidence scope; generation or package-mapping changes invalidate them.
+Requests are accepted only for the active repository commit and responses carry its generation. Cached values improve latency but do not widen evidence scope; generation or package-mapping changes invalidate them.
 
-## Local overlays
+## Unsaved editor state
 
-Only the selected unsaved document is overlaid initially. The result visibly combines local overlay evidence with the published repository generation. Edits invalidate and debounce the overlay request; cancellation prevents stale results from replacing a newer query. Cross-file local completeness is never implied.
+The browser context records that the active file is dirty but never transfers its selected text or document body. The browser continues to query the last published Git/index generation and adds an explicit limitation that unsaved changes are not indexed. Saving queues a repository refresh; until the new generation is ready, Trace does not imply working-tree completeness.

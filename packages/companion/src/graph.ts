@@ -311,8 +311,16 @@ function selectedSymbol(selection: Selection, symbols: IndexedSymbol[]): Indexed
   const containing = inPath.filter((symbol) => symbol.range.startLine <= selection.range.startLine && symbol.range.endLine >= selection.range.endLine)
     .sort((a, b) => (a.range.endLine - a.range.startLine) - (b.range.endLine - b.range.startLine))[0];
   if (containing || !selection.selectedText) return containing;
-  const selectedText = selection.selectedText.toLowerCase();
-  return symbols.find((symbol) => symbol.repositoryId === selection.revision.repositoryId && (symbol.memberName?.toLowerCase() === selectedText || symbol.fqn.toLowerCase().endsWith(selectedText)));
+  const selectedText = selection.selectedText.replace(/^\\/, "").toLowerCase();
+  const local = symbols.find((symbol) => symbol.repositoryId === selection.revision.repositoryId && (symbol.memberName?.toLowerCase() === selectedText || symbol.fqn.toLowerCase().endsWith(selectedText)));
+  if (local) return local;
+  if (!selectedText.includes("\\")) return undefined;
+  return symbols.find((symbol) => symbol.fqn.toLowerCase() === selectedText);
+}
+
+function qualifiedSelectionHint(selection: Selection): string | undefined {
+  const hint = selection.selectedText.replace(/^\\/, "");
+  return hint.includes("\\") && !hint.includes("::") ? hint : undefined;
 }
 
 function referencedClasses(symbols: readonly IndexedSymbol[]): Set<string> {
@@ -382,13 +390,15 @@ export class GraphService {
     await this.requestCheckpoint(signal);
     let relationships = this.store.activeRelationshipsForRepositories([...sourceRepositories]);
     await this.requestCheckpoint(signal);
+    const allowedRepositories = new Set(dependencies.flatMap((dependency) => {
+      if (!sourceRepositories.has(dependency.repositoryId)) return [];
+      const targetPackage = exactTarget(dependency);
+      return targetPackage ? [targetPackage.repositoryId] : [];
+    }));
+    const qualifiedHint = qualifiedSelectionHint(selection);
+    if (!selectedSymbol(selection, symbols) && qualifiedHint) symbols.push(...this.store.activeSymbolsMatchingClasses([...allowedRepositories], [qualifiedHint]));
     const focus = selectedSymbol(selection, symbols);
     if (focus) {
-      const allowedRepositories = new Set(dependencies.flatMap((dependency) => {
-        if (!sourceRepositories.has(dependency.repositoryId)) return [];
-        const targetPackage = exactTarget(dependency);
-        return targetPackage ? [targetPackage.repositoryId] : [];
-      }));
       const loadedIds = new Set(symbols.map((symbol) => symbol.id));
       const externalRepositories = new Set<string>();
       let pending = referencedClasses(originSourceSymbols(focus, symbols));
@@ -438,14 +448,16 @@ export class GraphService {
       // block the HTTP event loop for tens of seconds.
       symbols = this.store.activeSymbolsForRepositories([repositoryId]);
       relationships = this.store.activeRelationshipsForRepositories([repositoryId]);
+      const packagesByRepositoryAndName = new Map(packages.map((item) => [`${item.repositoryId}\0${item.name}`, item]));
+      const allowedRepositories = new Set(dependencies.flatMap((dependency) => {
+        if (dependency.repositoryId !== repositoryId || !dependency.indexedRepositoryId || !dependency.indexedRevision || ["ambiguous", "unavailable"].includes(dependency.resolution)) return [];
+        const targetPackage = packagesByRepositoryAndName.get(`${dependency.indexedRepositoryId}\0${dependency.packageName}`);
+        return targetPackage?.sourceCommit === dependency.indexedRevision ? [dependency.indexedRepositoryId] : [];
+      }));
+      const qualifiedHint = qualifiedSelectionHint(selection);
+      if (!selectedSymbol(selection, symbols) && qualifiedHint) symbols.push(...this.store.activeSymbolsMatchingClasses([...allowedRepositories], [qualifiedHint]));
       const focus = selectedSymbol(selection, symbols);
       if (focus) {
-        const packagesByRepositoryAndName = new Map(packages.map((item) => [`${item.repositoryId}\0${item.name}`, item]));
-        const allowedRepositories = new Set(dependencies.flatMap((dependency) => {
-          if (dependency.repositoryId !== repositoryId || !dependency.indexedRepositoryId || !dependency.indexedRevision || ["ambiguous", "unavailable"].includes(dependency.resolution)) return [];
-          const targetPackage = packagesByRepositoryAndName.get(`${dependency.indexedRepositoryId}\0${dependency.packageName}`);
-          return targetPackage?.sourceCommit === dependency.indexedRevision ? [dependency.indexedRepositoryId] : [];
-        }));
         const loadedIds = new Set(symbols.map((symbol) => symbol.id));
         const externalRepositories = new Set<string>();
         let pending = referencedClasses(originSourceSymbols(focus, symbols));

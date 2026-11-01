@@ -1,6 +1,6 @@
 import { ChangeInclusionResponseSchema, GraphResponseSchema, RepositoryRevisionMapSchema, TemporalGraphComparisonResponseSchema } from "@trace/contracts";
 import { z } from "zod";
-import { isAllowedGitHubUrl } from "./externalLinks";
+import { isAllowedGitHubUrl } from "./externalLinks.js";
 
 export const ModeSchema = z.enum(["origin", "inheritance", "callers", "consumers", "impact", "history"]);
 export type TraceMode = z.infer<typeof ModeSchema>;
@@ -21,8 +21,9 @@ export type WebviewInboundMessage = z.infer<typeof WebviewInboundMessageSchema>;
 
 export const ExtensionOutboundMessageSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("graph"), graph: GraphResponseSchema }),
+  z.object({ type: z.literal("context"), relativePath: z.string().min(1), line: z.number().int().positive() }),
   z.object({ type: z.literal("loading"), message: z.string() }),
-  z.object({ type: z.literal("error"), message: z.string(), detail: z.string().optional() }),
+  z.object({ type: z.literal("error"), message: z.string(), detail: z.string().optional(), trace: z.boolean().optional() }),
   z.object({ type: z.literal("connection"), connected: z.boolean() }),
   z.object({ type: z.literal("inclusion"), eventId: z.string().min(1), result: ChangeInclusionResponseSchema }),
   z.object({ type: z.literal("comparison"), result: TemporalGraphComparisonResponseSchema }),

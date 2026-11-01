@@ -1,26 +1,17 @@
 import {
-  ChangeInclusionResponseSchema,
-  CodeLensCountsRequestSchema,
-  CodeLensCountsResponseSchema,
+  BrowserLaunchResponseSchema,
   ErrorResponseSchema,
-  GraphResponseSchema,
   IndexStateSchema,
+  EditorContextResponseSchema,
+  EditorContextUpdateRequestSchema,
   PROTOCOL_VERSION,
-  TemporalGraphComparisonResponseSchema,
   type CompanionStatus,
-  type ChangeInclusionResponse,
-  type CodeLensCountsRequest,
-  type CodeLensCountsResponse,
-  type GraphResponse,
+  type EditorContextResponse,
+  type EditorContextUpdateRequest,
   type IndexState,
-  type Selection,
-  type RepositoryRevisionMap,
-  type TemporalGraphComparisonResponse,
 } from "@trace/contracts";
 import * as vscode from "vscode";
 import { z } from "zod";
-import type { TraceMode } from "./messages";
-import { buildTemporalComparisonRequest } from "./comparison";
 
 const TOKEN_KEY = "trace.companionClientToken";
 const QueuedRepositorySchema = z.object({ queued: z.string().min(1) });
@@ -72,52 +63,28 @@ export class CompanionClient {
     return this.request<CompanionStatus>("/v1/status", { method: "GET" }, signal, false);
   }
 
-  async trace(selection: Selection, mode: TraceMode, signal?: AbortSignal): Promise<GraphResponse> {
-    const raw = await this.request<unknown>("/v1/trace", {
+  async hasToken(): Promise<boolean> {
+    return Boolean(await this.secrets.get(TOKEN_KEY));
+  }
+
+  async updateEditorContext(request: EditorContextUpdateRequest, signal?: AbortSignal): Promise<EditorContextResponse> {
+    const body = EditorContextUpdateRequestSchema.parse(request);
+    const raw = await this.request<unknown>("/v1/editor-context", { method: "POST", body: JSON.stringify(body) }, signal);
+    return EditorContextResponseSchema.parse(raw);
+  }
+
+  async browserLaunch(signal?: AbortSignal): Promise<vscode.Uri> {
+    const raw = await this.request<unknown>("/v1/browser-launch", {
       method: "POST",
-      body: JSON.stringify({ protocolVersion: PROTOCOL_VERSION, mode, selection }),
+      body: JSON.stringify({ protocolVersion: PROTOCOL_VERSION }),
     }, signal);
-    const result = GraphResponseSchema.safeParse(raw);
-    if (!result.success) throw new CompanionError("The companion returned an invalid graph response.", "INVALID_RESPONSE");
-    const maxNodes = vscode.workspace.getConfiguration("trace").get<number>("maxGraphNodes", 180);
-    if (result.data.nodes.length > maxNodes) {
-      throw new CompanionError(`Graph has ${result.data.nodes.length} nodes; the configured limit is ${maxNodes}.`, "GRAPH_TOO_LARGE");
+    const response = BrowserLaunchResponseSchema.parse(raw);
+    const launch = new URL(response.url);
+    const companion = companionUrl();
+    if (launch.protocol !== "http:" || launch.origin !== companion.origin || !["127.0.0.1", "localhost", "[::1]"].includes(launch.hostname)) {
+      throw new CompanionError("The companion returned an unsafe browser launch URL.", "INVALID_RESPONSE");
     }
-    return result.data;
-  }
-
-  async lensCounts(request: CodeLensCountsRequest, signal?: AbortSignal): Promise<CodeLensCountsResponse> {
-    const body = CodeLensCountsRequestSchema.parse(request);
-    const raw = await this.request<unknown>("/v1/lenses/counts", { method: "POST", body: JSON.stringify(body) }, signal);
-    const result = CodeLensCountsResponseSchema.safeParse(raw);
-    if (!result.success) throw new CompanionError("The companion returned invalid CodeLens counts.", "INVALID_RESPONSE");
-    return result.data;
-  }
-
-  async compare(
-    selection: Selection,
-    mode: TraceMode,
-    beforeRevisions: RepositoryRevisionMap,
-    afterRevisions: RepositoryRevisionMap,
-    signal?: AbortSignal,
-  ): Promise<TemporalGraphComparisonResponse> {
-    const limit = vscode.workspace.getConfiguration("trace").get<number>("maxGraphNodes", 180);
-    const request = buildTemporalComparisonRequest(selection, mode, beforeRevisions, afterRevisions, limit);
-    const raw = await this.request<unknown>("/v1/trace/compare", { method: "POST", body: JSON.stringify(request) }, signal);
-    const result = TemporalGraphComparisonResponseSchema.safeParse(raw);
-    if (!result.success) throw new CompanionError("The companion returned an invalid temporal comparison.", "INVALID_RESPONSE");
-    if (result.data.before.nodes.length > limit || result.data.after.nodes.length > limit) {
-      throw new CompanionError(`Comparison exceeds the configured ${limit}-node limit.`, "GRAPH_TOO_LARGE");
-    }
-    return result.data;
-  }
-
-  async expand(queryId: string, nodeId: string, direction: "in" | "out" | "both", signal?: AbortSignal): Promise<GraphResponse> {
-    const raw = await this.request<unknown>("/v1/graph/expand", {
-      method: "POST",
-      body: JSON.stringify({ protocolVersion: PROTOCOL_VERSION, queryId, nodeId, direction }),
-    }, signal);
-    return GraphResponseSchema.parse(raw);
+    return vscode.Uri.parse(launch.toString(), true);
   }
 
   async refresh(repositoryPath: string, signal?: AbortSignal): Promise<{ queued: string }> {
@@ -146,24 +113,6 @@ export class CompanionClient {
   async repositories(signal?: AbortSignal): Promise<CompanionRepository[]> {
     const raw = await this.request<unknown>("/v1/repositories", { method: "GET" }, signal);
     return RepositoryListSchema.parse(raw).repositories;
-  }
-
-  async source(repositoryId: string, path: string, commit: string, signal?: AbortSignal): Promise<{ repositoryId: string; path: string; commit: string | null; source: string }> {
-    const query = new URLSearchParams({ repositoryId, path, commit });
-    const raw = await this.request<unknown>(`/v1/source?${query.toString()}`, { method: "GET" }, signal);
-    return z.object({ repositoryId: z.string(), path: z.string(), commit: z.string().nullable(), source: z.string() }).parse(raw);
-  }
-
-  async inclusion(symbolId: string, commit: string, signal?: AbortSignal): Promise<ChangeInclusionResponse> {
-    const raw = await this.request<unknown>("/v1/inclusion", {
-      method: "POST",
-      body: JSON.stringify({ protocolVersion: PROTOCOL_VERSION, symbolId, commit }),
-    }, signal);
-    return ChangeInclusionResponseSchema.parse(raw);
-  }
-
-  dashboardUrl(): vscode.Uri {
-    return vscode.Uri.parse(new URL("/", companionUrl()).toString());
   }
 
   private async request<T>(path: string, init: RequestInit, outerSignal?: AbortSignal, requireToken = true): Promise<T> {

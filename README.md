@@ -6,7 +6,7 @@
 
 Trace is a VS Code extension and local companion for understanding where PHP behaviour comes from, what it can affect, which Composer projects consume it, and how it changed over Git history.
 
-Select a class or method, open Trace, and move through an evidence-backed graph without leaving the editor. Every relationship carries its source, exact revision, confidence, and known limitations. Dynamic behaviour is shown as uncertain instead of being guessed.
+Select a class or method in VS Code, open Trace in your browser, and move through an evidence-backed graph that follows the editor context. Every relationship carries its source, exact revision, confidence, and known limitations. Dynamic behaviour is shown as uncertain instead of being guessed.
 
 **Local-first · Read-only worktrees · PHP and Composer · VS Code**
 
@@ -18,7 +18,7 @@ Select a class or method, open Trace, and move through an evidence-backed graph 
   <img src="docs/assets/readme/trace-overview-light.png" alt="Trace relationship graph showing a PHP method, its callers, contract, package implementation, consumers, history, and evidence inspector" width="100%">
 </picture>
 
-<p align="center"><em>Fixture-backed data in the real Trace webview. GitHub automatically selects the light or dark capture.</em></p>
+<p align="center"><em>Fixture-backed relationship data. GitHub automatically selects the light or dark capture.</em></p>
 
 ## What Trace can answer
 
@@ -83,11 +83,10 @@ In the Extension Development Host:
 
 1. Copy the token without printing it: `pbcopy < ~/.trace/client-token` on macOS.
 2. Run **Trace: Set Companion Client Token** and paste it.
-3. Open `consumer-store/src/Order.php`.
-4. Put the cursor on `calculateTotal`.
-5. Run **Trace: Explore Selected Symbol**.
+3. Open `consumer-store/src/Order.php` and put the cursor on `calculateTotal`.
+4. Click the primary **Trace** status item or run **Trace: Open Trace**.
 
-You should see a Trace tab with the local override in focus, the package implementation, callers, contracts, consumers, and four fixture history events. Keep the tab visible and move to another PHP symbol to see the current mode follow the editor selection.
+The extension requests a short-lived, single-use browser launch from the companion. The browser should open the Trace relationship view with the local override in focus, plus its package implementation, callers, contracts, consumers, and fixture history. Keep the browser visible and move to another indexed PHP symbol in VS Code; the graph follows the latest editor context after the default 300 ms debounce.
 
 > [!TIP]
 > On Linux or Windows, read `~/.trace/client-token` with a local command appropriate for your shell, then paste it into the VS Code command. Do not put the token in workspace settings, a URL, or source control.
@@ -109,16 +108,16 @@ Reload VS Code, start the companion, set the client token, and open a PHP worksp
 ```mermaid
 flowchart TD
     A[PHP cursor selection] --> B[VS Code extension]
-    B -->|Authenticated loopback HTTP| C[Local companion]
+    B -->|Position and revision metadata only| C[Local companion]
     C --> D[Git and Composer discovery]
     C --> E[Position-aware PHP analysis]
     D --> F[(Versioned SQLite index)]
     E --> F
     F --> G[Graph, history, and inclusion queries]
-    G --> H[Trace webview and CodeLens]
+    G --> H[Authenticated browser UI]
 ```
 
-The extension sends the selected repository, revision, path, source range, and an ephemeral overlay for the active unsaved file. The companion owns indexing, Composer resolution, Git history, optional GitHub access, and persistence. Published generations are replaced atomically, so an interrupted refresh leaves the previous graph usable.
+The extension owns workspace discovery, scan status, settings, and publication of the active editor's repository, revision, relative path, cursor range, and bounded theme kind. It does not publish selected or document source text to the browser context channel. The companion owns indexing, Composer resolution, Git history, optional GitHub access, persistence, and the primary browser UI. Published generations are replaced atomically, so an interrupted refresh leaves the previous graph usable.
 
 [Read the architecture and data model](docs/architecture.md)
 
@@ -160,15 +159,14 @@ Workspace discovery and Composer expansion are automatic by default. Work enters
 
 The companion writes state to `~/.trace` by default. It does not create indexes, manifests, or caches inside repositories being scanned.
 
-### Editor-native workflow
+### Editor-to-browser workflow
 
-- The visible Trace tab follows the current PHP symbol after a 300 ms debounce.
-- Superseded graph requests are cancelled.
-- Saved PHP files receive cached, revision-qualified CodeLens counts for callers and exact package consumers.
-- Editing removes stale lenses; they return only after the refreshed generation is published.
-- Historical source opens in read-only virtual documents.
-- A closed Trace tab can be restored with **Trace: Open Trace** or the primary Trace status item, preserving the last graph and mode.
-- The webview uses VS Code theme tokens, compact responsive panels, reduced-motion support, and local bundled assets.
+- The primary **Trace** status item and exploration commands open the authenticated loopback browser UI.
+- The extension publishes the latest eligible PHP cursor position after a 300 ms debounce; superseded editor work is cancelled.
+- Legacy Origin, Inheritance, Callers, Consumers, Impact and History commands select the matching browser mode before launch.
+- Browser launches use a short-lived, single-use ticket exchanged for an HttpOnly, SameSite browser session; the client token is not stored by browser JavaScript.
+- The context channel sends repository/path/revision/range metadata and a bounded light/dark/high-contrast theme kind only. Unsaved source and selected-text contents stay out of browser payloads.
+- Scans read the project while all index, session and cache state remains in the companion data directory.
 
 [Browse every captured feature and UI state](docs/visual-guide.md)
 
@@ -192,12 +190,9 @@ The defaults are sufficient for the fixture quick start.
 | Setting | Default | Purpose |
 | --- | ---: | --- |
 | `trace.companionUrl` | `http://127.0.0.1:47173` | Loopback companion endpoint; non-loopback URLs are rejected. |
-| `trace.requestTimeoutMs` | `30000` | Graph request timeout. |
-| `trace.maxGraphNodes` | `180` | Maximum nodes accepted in one graph response. |
-| `trace.followActiveEditor` | `true` | Follow the active PHP symbol while Trace is visible. |
+| `trace.requestTimeoutMs` | `30000` | Companion request timeout. |
+| `trace.followActiveEditor` | `true` | Publish eligible active PHP cursor context to the companion browser. |
 | `trace.autoScanWorkspace` | `true` | Discover eligible local Git/Composer roots automatically. |
-| `trace.codeLens.enabled` | `true` | Show cached caller and consumer counts on saved PHP symbols. |
-| `trace.trustedSourceRoots` | `[]` | Additional absolute roots that Trace may open. |
 
 Companion queue controls include `TRACE_REPOSITORY_CONCURRENCY`, `TRACE_ANALYSIS_CONCURRENCY`, `TRACE_MAX_QUEUE`, `TRACE_AUTO_SCAN`, and `TRACE_WATCH`. Keep `TRACE_HOST` on loopback.
 
@@ -205,7 +200,7 @@ Companion queue controls include `TRACE_REPOSITORY_CONCURRENCY`, `TRACE_ANALYSIS
 
 ## Optional GitHub integration
 
-Local tracing needs no GitHub credential. For pull-request/release association or opt-in repository discovery, provide a least-privilege token to the companion through `TRACE_GITHUB_TOKEN` for the current process or the authenticated local dashboard. The token never enters the extension webview and is not returned by the API.
+Local tracing needs no GitHub credential. For pull-request/release association or opt-in repository discovery, provide a least-privilege token to the companion through `TRACE_GITHUB_TOKEN` for the current process or the authenticated local admin page. The token is not returned by the API or included in graph payloads.
 
 [Security and credential boundaries](docs/security.md)
 
@@ -223,10 +218,9 @@ Useful commands:
 npm run dev:companion      # companion with Node watch mode
 npm run fixture            # generate deterministic Git/Composer fixtures
 npm run package:extension  # build the installable VSIX
-npm run preview -w trace-vscode
 ```
 
-The fixtures and focused tests cover PHP relationships, receiver uncertainty, Composer precedence, graph layout, historical reconstruction, move/rename lineage, equivalent patches, reverts, optional GitHub association boundaries, queueing, cancellation, CodeLens caching, and light/dark webview presentation.
+The fixtures and focused tests cover PHP relationships, receiver uncertainty, Composer precedence, graph layout, historical reconstruction, move/rename lineage, equivalent patches, reverts, optional GitHub association boundaries, queueing, cancellation, browser-session authentication, and source-free editor-context publication.
 
 ## Troubleshooting
 
@@ -235,10 +229,10 @@ The fixtures and focused tests cover PHP relationships, receiver uncertainty, Co
 | Companion offline | Start `npm start -w @trace/companion`; confirm the extension uses the same loopback port. |
 | Authentication paused or HTTP 401 | Copy the current client-token file and run **Trace: Set Companion Client Token** again. |
 | Protocol mismatch | Rebuild the companion and VSIX from the same checkout, reinstall with `--force`, and reload VS Code. |
-| Repository stays queued | Open **Trace: Open Companion** and inspect the job stage/failure before retrying. |
-| Closed Trace tab will not reopen | Run **Trace: Open Trace** or click the primary Trace status item to restore the last graph. |
+| Repository stays queued | Open the companion admin page from the browser's settings control and inspect the job stage/failure before retrying. |
+| Browser asks for a token | Click the Trace status item to mint a fresh one-time launch, or paste the local client token into the fallback form. The form clears it after exchange. |
+| Browser stays on “Waiting for an active PHP selection” | Focus an indexed local PHP file in VS Code, confirm `trace.followActiveEditor` is enabled, and wait for the repository generation to become ready. |
 | Missing package relationship | Inspect installed path, lock source identity, repository candidates, revision coverage, and explicit mappings. |
-| No CodeLens | Save the PHP file and wait for the repository generation to become ready; zero counts are intentionally hidden. |
 
 For a complete acceptance tour, use the [manual verification guide](docs/manual-verification.md).
 

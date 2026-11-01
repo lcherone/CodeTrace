@@ -1,6 +1,6 @@
 # Security model
 
-Trace treats repositories, Git hosting responses, and webview messages as untrusted input.
+Trace treats repositories, Git hosting responses, browser input, and editor-context messages as untrusted input.
 
 ## Local transport
 
@@ -8,10 +8,12 @@ Trace treats repositories, Git hosting responses, and webview messages as untrus
 - Requests require a matching protocol version. The minimal status probe is public; repository, index, graph, source and mutation routes require a local bearer token.
 - Tokens are sent in headers, never URLs, and are not written to logs.
 - Browser origins are restricted; mutation endpoints reject cross-origin requests.
-- Request bodies and webview messages are schema-validated and size-bounded.
+- Request bodies and editor-context messages are schema-validated and size-bounded.
 - Port conflicts fail clearly instead of silently binding to a public interface.
 
-The extension webview receives query results, not GitHub credentials. Its content security policy permits only bundled local resources; scripts and styles are external assets, opened links are allow-listed, messages are validated in both directions, and repository text is inserted as text rather than HTML.
+The primary browser UI uses only same-origin bundled resources under a restrictive content security policy. An authenticated extension request mints a short-lived, single-use launch ticket; exchange redirects to a clean URL and creates an HttpOnly, SameSite session cookie. The manual token form exchanges the token once, clears the input, and does not store it in browser JavaScript.
+
+Editor context contains repository identity/root, relative path, exact revision/dirty state, cursor range, mode and a bounded theme kind. It omits selected-text contents, document text and document version. Browser graph responses omit historical before/after source bodies. The UI can still show sensitive identifiers such as paths, symbol names, evidence summaries and commits, so it must remain on loopback and should not be screen-shared casually.
 
 ## Credentials
 
@@ -28,6 +30,7 @@ GitHub pull-request/release association is optional and failure-isolated. With n
 - Remote repositories use a companion-owned cache separate from working repositories.
 - Git operations use argument arrays and validated refs/paths, not shell interpolation.
 - Indexing reads source and metadata; it does not execute Composer scripts, project build scripts, autoloaders or repository code.
+- Indexing does not write manifests, caches, indexes or session files into scanned projects. SQLite, browser sessions and generated state stay in the companion data directory.
 - Composer repository declarations and lock URLs are untrusted metadata. They are sanitized for display and used only as identity candidates; Trace does not contact arbitrary Composer/VCS URLs merely because a repository declares them.
 - Archive extraction and file traversal enforce repository boundaries and ignore dependencies/generated bundles unless explicitly configured.
 

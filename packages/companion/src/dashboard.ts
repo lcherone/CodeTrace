@@ -1,4 +1,4 @@
-export const dashboardHtml = `<!doctype html>
+export const adminDashboardHtml = `<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'nonce-trace'; style-src 'nonce-trace'; connect-src 'self'; form-action 'none'; base-uri 'none'">
 <title>Trace companion</title><style nonce="trace">
@@ -16,6 +16,6 @@ q('#addRepo').onclick=async()=>{const id=q('#repoId').value.trim(),root=q('#repo
 q('#addMapping').onclick=async()=>{await api('/v1/package-mappings',{method:'POST',body:JSON.stringify({protocolVersion:protocol,packageName:q('#mappingPackage').value.trim(),repositoryId:q('#mappingRepo').value.trim(),packageRoot:''})});await refresh()};
 q('#saveGithub').onclick=async()=>{await api('/v1/credentials/github',{method:'PUT',body:JSON.stringify({protocolVersion:protocol,token:q('#githubToken').value})});q('#githubToken').value='';q('#discovered').textContent='GitHub credential saved.'};
 q('#discoverGithub').onclick=async()=>{const result=await api('/v1/github/discover',{method:'POST',body:JSON.stringify({protocolVersion:protocol,organisation:q('#githubOrg').value.trim()})});q('#discovered').replaceChildren(...result.repositories.map(repo=>text('div',repo.fullName+' · '+repo.defaultBranch,'repo')))};
-if(token){q('#token').value=token;q('#connect').click()}
+if(token){q('#token').value=token;q('#connect').click()}else{api('/v1/repositories').then(()=>{q('#login').hidden=true;q('#app').hidden=false;return refresh()}).catch(()=>{})}
 setInterval(()=>{if(!q('#app').hidden)refresh().catch(()=>{})},3000);
 </script></body></html>`;

@@ -55,6 +55,55 @@ export type Selection = z.infer<typeof SelectionSchema>;
 export const TraceModeSchema = z.enum(["origin", "inheritance", "callers", "consumers", "impact", "history"]);
 export type TraceMode = z.infer<typeof TraceModeSchema>;
 
+export const BrowserLaunchRequestSchema = z.object({
+  protocolVersion: z.literal(PROTOCOL_VERSION),
+});
+export type BrowserLaunchRequest = z.infer<typeof BrowserLaunchRequestSchema>;
+
+export const BrowserLaunchResponseSchema = z.object({
+  protocolVersion: z.literal(PROTOCOL_VERSION),
+  url: z.string().url(),
+  expiresAt: z.string().datetime(),
+});
+export type BrowserLaunchResponse = z.infer<typeof BrowserLaunchResponseSchema>;
+
+export const EditorContextSelectionSchema = z.object({
+  repositoryPath: z.string().min(1),
+  relativePath: z.string().min(1),
+  revision: RevisionIdentitySchema,
+  range: SourceRangeSchema,
+  symbolHint: z.string().min(1).max(512).regex(/^[A-Za-z_][A-Za-z0-9_]*(?:\\[A-Za-z_][A-Za-z0-9_]*)*(?:::[A-Za-z_][A-Za-z0-9_]*)?$/).optional(),
+}).strict();
+export type EditorContextSelection = z.infer<typeof EditorContextSelectionSchema>;
+
+export const EditorContextPayloadSchema = z.object({
+  selection: EditorContextSelectionSchema,
+  mode: TraceModeSchema.default("impact"),
+  theme: z.enum(["light", "dark", "high-contrast"]).optional(),
+});
+export type EditorContextPayload = z.infer<typeof EditorContextPayloadSchema>;
+
+export const EditorContextUpdateRequestSchema = z.object({
+  protocolVersion: z.literal(PROTOCOL_VERSION),
+  clientId: z.string().min(1).max(128),
+  context: EditorContextPayloadSchema.nullable(),
+});
+export type EditorContextUpdateRequest = z.infer<typeof EditorContextUpdateRequestSchema>;
+
+export const EditorContextStateSchema = EditorContextPayloadSchema.extend({
+  clientId: z.string().min(1).max(128),
+  generation: z.number().int().nonnegative(),
+  receivedAt: z.string().datetime(),
+});
+export type EditorContextState = z.infer<typeof EditorContextStateSchema>;
+
+export const EditorContextResponseSchema = z.object({
+  protocolVersion: z.literal(PROTOCOL_VERSION),
+  version: z.number().int().nonnegative(),
+  context: EditorContextStateSchema.nullable(),
+});
+export type EditorContextResponse = z.infer<typeof EditorContextResponseSchema>;
+
 export const TraceRequestSchema = z.object({
   protocolVersion: z.literal(PROTOCOL_VERSION),
   requestId: z.string().min(1),

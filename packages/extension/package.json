@@ -2,7 +2,7 @@
   "name": "trace-vscode",
   "displayName": "Trace",
   "description": "Explore PHP symbol origins, callers, consumers, and history.",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "publisher": "trace-dev",
   "private": true,
   "license": "MIT",
@@ -128,17 +128,10 @@
           "maximum": 300000,
           "description": "Companion request timeout in milliseconds."
         },
-        "trace.maxGraphNodes": {
-          "type": "number",
-          "default": 180,
-          "minimum": 20,
-          "maximum": 1000,
-          "description": "Maximum nodes accepted in one graph response."
-        },
         "trace.followActiveEditor": {
           "type": "boolean",
           "default": true,
-          "description": "Automatically refresh an open, visible Trace graph when the active PHP editor or cursor selection changes."
+          "description": "Publish the active PHP editor path, revision and cursor position to the connected local Trace companion. Source contents are never sent."
         },
         "trace.followDelayMs": {
           "type": "number",
@@ -172,33 +165,6 @@
           "minimum": 1,
           "maximum": 5000,
           "description": "Maximum Composer manifests inspected during one workspace discovery pass. Discovery reports when this limit is reached."
-        },
-        "trace.codeLens.enabled": {
-          "type": "boolean",
-          "default": true,
-          "description": "Show cached Trace caller and package-consumer counts above indexed PHP symbols. Unsaved or generation-stale documents never show lenses."
-        },
-        "trace.codeLens.delayMs": {
-          "type": "number",
-          "default": 0,
-          "minimum": 0,
-          "maximum": 2000,
-          "description": "Debounce delay before a saved PHP document requests one batched CodeLens count query."
-        },
-        "trace.codeLens.maxSymbolsPerDocument": {
-          "type": "number",
-          "default": 120,
-          "minimum": 1,
-          "maximum": 200,
-          "description": "Maximum PHP symbols included in one CodeLens count batch. The companion hard limit is 200."
-        },
-        "trace.trustedSourceRoots": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          },
-          "default": [],
-          "description": "Additional absolute roots from which Trace may open indexed source."
         }
       }
     }
@@ -206,7 +172,6 @@
   "scripts": {
     "build": "node esbuild.mjs",
     "watch": "node esbuild.mjs --watch",
-    "preview": "npm run build && node preview-server.mjs",
     "check": "tsc -p tsconfig.json --noEmit",
     "test": "tsx --test \"src/**/*.test.ts\"",
     "package": "npm run build && vsce package --no-dependencies",
@@ -214,13 +179,9 @@
   },
   "dependencies": {
     "@trace/contracts": "0.1.0",
-    "@vscode/codicons": "^0.0.46-24",
-    "cytoscape": "^3.33.1",
-    "php-parser": "^3.2.5",
     "zod": "^4.1.12"
   },
   "devDependencies": {
-    "@types/cytoscape": "^3.21.9",
     "@types/vscode": "^1.95.0",
     "@vscode/vsce": "^4.1.0",
     "esbuild": "^0.25.11",

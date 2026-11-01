@@ -34,6 +34,51 @@ test("loopback server exposes a CSP-safe dashboard and health but protects repos
   }
 });
 
+test("browser launch, cookie auth, editor context, assets, and source privacy work end to end", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "trace-server-browser-"));
+  const token = "test-token-that-is-long-enough", commit = "a".repeat(40), root = "/synthetic/browser";
+  const companion = await startServer({ host: "127.0.0.1", port: 0, dataDirectory: directory, fixtureMode: true, token, automaticScan: false });
+  const bearer = { "Content-Type": "application/json", "X-Trace-Protocol": PROTOCOL_VERSION, Authorization: `Bearer ${token}` };
+  try {
+    companion.store.upsertRepository({ id: "browser-repo", root });
+    const generation = companion.store.beginGeneration("browser-repo", commit, "main", false, 1);
+    const parsed = parsePhp(`<?php
+namespace App;
+
+final class Service
+{
+    public function target(): void {}
+}`, "src/Service.php");
+    const symbols = symbolsFromFiles("browser-repo", generation, commit, [parsed]);
+    companion.store.publishGeneration(generation, "browser-repo", "browser-route", symbols, resolveRelationships("browser-repo", generation, commit, symbols), [], []);
+    const focus = symbols.find((item) => item.fqn === "App\\Service::target"); assert.ok(focus);
+    for (const symbol of symbols) companion.store.replaceHistory("browser-repo", symbol.id, [{ id: `history-source-${symbol.kind}`, symbolId: symbol.id, commit, category: "implementation", summary: "Changed target", authorName: "Trace", authorEmail: "trace@example.test", authoredAt: new Date().toISOString(), beforeSource: "<?php SENTINEL_BROWSER_SOURCE", afterSource: "<?php SENTINEL_BROWSER_SOURCE_AFTER", limitations: [] }]);
+
+    const page = await fetch(`${companion.url}/`); const html = await page.text(); assert.equal(page.status, 200);
+    const nonce = html.match(/script-src 'self' 'nonce-([^']+)'/)?.[1]; assert.ok(nonce); assert.match(page.headers.get("content-security-policy") ?? "", new RegExp(`style-src 'self' 'nonce-${nonce}'`)); assert.match(page.headers.get("content-security-policy") ?? "", /frame-ancestors 'none'/); assert.match(html, new RegExp(`nonce="${nonce}" src="/browser/bridge\\.js\\?v=[a-f0-9]+"`)); assert.match(html, new RegExp(`nonce="${nonce}" src="/browser/app\\.js\\?v=[a-f0-9]+"`)); assert.doesNotMatch(html, /\{\{[^}]+\}\}/);
+    for (const asset of ["bridge.js", "app.js", "app.css", "codicon.ttf"]) { const response = await fetch(`${companion.url}/browser/${asset}`); assert.equal(response.status, 200, asset); assert.equal(response.headers.get("cache-control"), "no-store", asset); }
+
+    const launch = await fetch(`${companion.url}/v1/browser-launch`, { method: "POST", headers: bearer, body: JSON.stringify({ protocolVersion: PROTOCOL_VERSION }) }); assert.equal(launch.status, 201);
+    const launchPayload = await launch.json() as { url: string; expiresAt: string }; assert.equal(new URL(launchPayload.url).origin, companion.url);
+    const exchange = await fetch(launchPayload.url, { redirect: "manual" }); assert.equal(exchange.status, 303); assert.equal(exchange.headers.get("location"), "/");
+    const setCookie = exchange.headers.get("set-cookie"); assert.ok(setCookie); assert.match(setCookie, /HttpOnly/); assert.match(setCookie, /SameSite=Strict/);
+    const cookie = setCookie.split(";")[0]!;
+    const reuse = await fetch(launchPayload.url, { redirect: "manual" }); assert.equal(reuse.status, 401);
+    const repositories = await fetch(`${companion.url}/v1/repositories`, { headers: { "X-Trace-Protocol": PROTOCOL_VERSION, Cookie: cookie } }); assert.equal(repositories.status, 200);
+
+    const selection = { repositoryPath: root, relativePath: focus.path, revision: { repositoryId: root, commit, dirty: true }, range: focus.range };
+    const leakedContext = await fetch(`${companion.url}/v1/editor-context`, { method: "POST", headers: bearer, body: JSON.stringify({ protocolVersion: PROTOCOL_VERSION, clientId: "window-1", context: { mode: "origin", selection: { ...selection, selectedText: "SENTINEL", documentText: "<?php SENTINEL_BROWSER_SOURCE" } } }) }); assert.equal(leakedContext.status, 400);
+    const mismatch = await fetch(`${companion.url}/v1/editor-context`, { method: "POST", headers: bearer, body: JSON.stringify({ protocolVersion: PROTOCOL_VERSION, clientId: "window-1", context: { mode: "origin", selection: { ...selection, revision: { ...selection.revision, commit: "b".repeat(40) } } } }) }); assert.equal(mismatch.status, 409);
+    const update = await fetch(`${companion.url}/v1/editor-context`, { method: "POST", headers: bearer, body: JSON.stringify({ protocolVersion: PROTOCOL_VERSION, clientId: "window-1", context: { mode: "origin", theme: "dark", selection } }) }); assert.equal(update.status, 200);
+    const current = await fetch(`${companion.url}/v1/editor-context?after=0&waitMs=0`, { headers: { "X-Trace-Protocol": PROTOCOL_VERSION, Cookie: cookie } }); const currentPayload = await current.json() as any; assert.equal(currentPayload.context.generation, generation); assert.equal(currentPayload.context.selection.revision.repositoryId, "browser-repo"); assert.equal(currentPayload.context.selection.revision.dirty, true); assert.equal(JSON.stringify(currentPayload).includes("SENTINEL_BROWSER_SOURCE"), false);
+
+    const traceBody = { protocolVersion: PROTOCOL_VERSION, mode: "origin", limit: 100, selection: { ...selection, selectedText: "target" } };
+    const browserTrace = await fetch(`${companion.url}/v1/trace`, { method: "POST", headers: { "Content-Type": "application/json", "X-Trace-Protocol": PROTOCOL_VERSION, Cookie: cookie, Origin: companion.url }, body: JSON.stringify(traceBody) }); assert.equal(browserTrace.status, 200); const browserText = await browserTrace.text(); assert.doesNotMatch(browserText, /SENTINEL_BROWSER_SOURCE|beforeSource|afterSource/);
+    const bearerTrace = await fetch(`${companion.url}/v1/trace`, { method: "POST", headers: bearer, body: JSON.stringify(traceBody) }); assert.equal(bearerTrace.status, 200); assert.match(await bearerTrace.text(), /SENTINEL_BROWSER_SOURCE/);
+    const source = await fetch(`${companion.url}/v1/source?repositoryId=browser-repo&path=src%2FService.php&commit=${commit}`, { headers: { "X-Trace-Protocol": PROTOCOL_VERSION, Cookie: cookie } }); assert.equal(source.status, 403);
+  } finally { await companion.close(); await rm(directory, { recursive: true, force: true }); }
+});
+
 test("CodeLens count route is authenticated, batched, cached, and revision-qualified", async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "trace-server-lenses-"));
   const token = "test-token-that-is-long-enough"; const commit = "a".repeat(40);

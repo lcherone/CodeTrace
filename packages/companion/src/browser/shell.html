@@ -26,12 +26,20 @@
           <label class="filter-label"><i class="codicon codicon-filter" aria-hidden="true"></i><span>Confidence</span><select id="confidence" aria-label="Confidence"><option value="all">All</option><option value="confirmed">Confirmed</option><option value="possible">Possible</option><option value="dependency-only">Dependency only</option><option value="unresolved">Unresolved</option></select></label>
         </div>
       </header>
-      <nav class="breadcrumbs" id="breadcrumbs" aria-label="Navigation history"></nav>
-      <main class="workspace">
-        <aside class="rail panel" aria-label="Relationships">
-          <div class="panel-title"><h2>Relationships</h2><span><span class="count" id="relationship-count">0</span><button class="icon-button" id="focus-search" title="Filter relationships" aria-label="Filter relationships"><i class="codicon codicon-filter" aria-hidden="true"></i></button></span></div>
+      <section class="contextbar" aria-label="Current trace context">
+        <div class="context-symbol"><i class="codicon codicon-symbol-method" aria-hidden="true"></i><span id="context-symbol">Waiting for selection</span></div>
+        <nav class="breadcrumbs" id="breadcrumbs" aria-label="Navigation history"></nav>
+        <div class="context-metrics">
+          <span id="visible-count">0 shown</span><span aria-hidden="true">·</span><span id="total-count">0 relationships</span>
+          <span class="context-partial" id="context-partial"></span>
+        </div>
+      </section>
+      <main class="workspace" id="workspace">
+        <aside class="rail panel" id="relationships-panel" aria-label="Relationships">
+          <div class="panel-title"><h2>Relationships</h2><span><span class="count" id="relationship-count">0</span><button class="icon-button" id="focus-search" title="Filter relationships" aria-label="Filter relationships"><i class="codicon codicon-filter" aria-hidden="true"></i></button><button class="icon-button panel-close" id="close-relationships" title="Close relationships" aria-label="Close relationships"><i class="codicon codicon-close" aria-hidden="true"></i></button></span></div>
           <nav class="relationship-tree" id="relationship-tree" aria-label="Relationship list"></nav>
         </aside>
+        <div class="rail-resizer" id="relationship-resizer" role="separator" aria-label="Resize relationships panel" aria-controls="relationships-panel" aria-orientation="vertical" aria-valuemin="220" aria-valuemax="560" aria-valuenow="236" tabindex="0" title="Drag to resize relationships panel"></div>
         <section class="canvas-wrap" aria-label="Relationship graph">
           <section class="comparison-summary" id="comparison-summary" aria-label="Temporal comparison bases" hidden>
             <div class="comparison-bases" id="comparison-bases"></div>
@@ -41,7 +49,17 @@
           <button class="panel-toggle panel-toggle-left" id="toggle-relationships" aria-label="Show relationships" aria-expanded="false"><i class="codicon codicon-list-tree" aria-hidden="true"></i><span>Relationships</span></button>
           <button class="panel-toggle panel-toggle-right" id="toggle-details" aria-label="Show details" aria-expanded="false"><i class="codicon codicon-layout-sidebar-right" aria-hidden="true"></i><span>Details</span></button>
           <button class="comparison-toggle" id="open-comparison-mobile" type="button" aria-label="Compare revisions"><i class="codicon codicon-git-compare" aria-hidden="true"></i><span>Compare</span></button>
-          <div class="canvas-tools" role="toolbar" aria-label="Graph controls">
+          <div class="view-tools" role="toolbar" aria-label="Graph structure controls">
+            <span class="toolbar-label">Depth</span>
+            <div class="segmented" id="graph-depth" role="group" aria-label="Graph depth">
+              <button type="button" data-depth="focused" aria-pressed="true">Focused</button>
+              <button type="button" data-depth="neighbours" aria-pressed="false">Neighbours</button>
+              <button type="button" data-depth="all" aria-pressed="false">All</button>
+            </div>
+            <label class="node-limit"><span>Nodes</span><select id="node-limit" aria-label="Maximum visible nodes"><option value="10">10</option><option value="18">18</option><option value="36">36</option><option value="72">72</option><option value="144">144</option><option value="Infinity">No cap</option></select></label>
+            <button class="hidden-summary" id="show-more-graph" type="button" hidden></button>
+          </div>
+          <div class="canvas-tools" role="toolbar" aria-label="Zoom controls">
             <button id="zoom-in" title="Zoom in" aria-label="Zoom in"><i class="codicon codicon-zoom-in" aria-hidden="true"></i></button>
             <button id="zoom-out" title="Zoom out" aria-label="Zoom out"><i class="codicon codicon-zoom-out" aria-hidden="true"></i></button>
             <button id="fit" title="Fit graph" aria-label="Fit graph"><i class="codicon codicon-screen-full" aria-hidden="true"></i></button>
@@ -51,14 +69,16 @@
           <div class="canvas-state" id="canvas-state" hidden></div>
         </section>
         <aside class="inspector panel" aria-label="Selection details">
-          <div class="panel-title"><h2 id="detail-kind">Details</h2><span class="confidence" id="detail-confidence"></span></div>
+          <div class="panel-title"><h2 id="detail-kind">Details</h2><span><span class="confidence" id="detail-confidence"></span><button class="icon-button panel-close" id="close-details" title="Close details" aria-label="Close details"><i class="codicon codicon-close" aria-hidden="true"></i></button></span></div>
           <div id="details" class="details empty"><p>Select a node or relationship to inspect its evidence.</p></div>
         </aside>
       </main>
-      <section class="history" aria-label="Symbol history">
-        <div class="history-heading"><h2>History</h2><span id="history-symbol"></span><span class="history-count" id="history-count">0 events</span></div>
-        <div class="timeline" id="timeline"></div>
-        <canvas class="graph-minimap" id="graph-minimap" width="186" height="76" aria-label="Graph minimap" role="img" title="Click to fit graph"></canvas>
+      <section class="history" id="history-panel" aria-label="Symbol history">
+        <button class="history-heading" id="toggle-history" type="button" aria-expanded="false"><i class="codicon codicon-chevron-up" aria-hidden="true"></i><h2>History</h2><span id="history-symbol"></span><span class="history-count" id="history-count">0 events</span></button>
+        <div class="history-content">
+          <div class="timeline" id="timeline"></div>
+          <canvas class="graph-minimap" id="graph-minimap" width="186" height="76" aria-label="Graph minimap" role="img" title="Click to fit graph"></canvas>
+        </div>
       </section>
       <footer class="statusbar">
         <span class="status-item"><i class="codicon codicon-pass-filled" aria-hidden="true"></i><span id="index-status">Waiting for graph</span></span>

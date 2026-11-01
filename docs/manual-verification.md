@@ -1,6 +1,6 @@
 # Manual verification guide
 
-Record every check as passed, failed, blocked or not run. Keep source/test evidence separate from a running companion, rendered extension, and external GitHub evidence.
+Record every check as passed, failed, blocked or not run. Keep source/test evidence separate from a running companion, rendered browser UI, installed extension, and external GitHub evidence.
 
 ## 1. Automated baseline
 
@@ -12,7 +12,7 @@ npm test
 npm run fixture
 ```
 
-Expected: all workspaces build; contract/parser/persistence/history/extension helper/fixture tests pass; the fixture manifest lists three repositories, exact commits and the deterministic `commerce-v1-to-v2-adoption` comparison. A TypeScript build does not prove the running companion or rendered webview.
+Expected: all workspaces build; contract/parser/persistence/history/extension helper/fixture tests pass; the fixture manifest lists three repositories, exact commits and the deterministic `commerce-v1-to-v2-adoption` comparison. A TypeScript build does not prove the running companion or rendered browser UI.
 
 ## 2. Companion runtime
 
@@ -22,11 +22,11 @@ TRACE_FIXTURE_MODE=1 npm run dev:companion
 
 Verify:
 
-1. The process binds only to loopback and prints a dashboard URL.
+1. The process binds only to loopback and prints the primary browser URL.
 2. An unauthenticated API call returns 401.
 3. `GET /health` works without a token. `/v1/status` requires `X-Trace-Protocol: 1.0` but is deliberately a no-data public probe; repository, index, graph, source and mutation routes also require `Authorization: Bearer …`.
 4. A wrong protocol header returns the documented mismatch error and `/v1/status` reports fixture mode and protocol `1.0`.
-5. The dashboard labels fixture data and shows all three repositories.
+5. The browser settings control opens `/admin`; the admin page labels fixture data and shows all three repositories.
 6. Refresh the shared package. Confirm a new generation is published and unchanged file analyses are reused.
 7. Cancel a refresh. Confirm the previous complete generation remains queryable.
 8. Restart the companion. Confirm the published generation survives.
@@ -34,6 +34,8 @@ Verify:
 10. With a disposable fixture scan queued, call `POST /v1/index/cancel`; confirm it becomes cancelled and the last published generation remains active.
 11. Edit a PHP file with watching enabled; confirm one debounced filesystem job appears. Repeat with `TRACE_WATCH=0` and confirm only manual refresh schedules work.
 12. Inspect the scanner snapshot and job fields for queue/active counts, capacity, stage, cache hits/misses, filesystem fallback, duration and throughput.
+13. Request `POST /v1/browser-launch` with the bearer token. Confirm the returned URL is same-origin loopback, its ticket works once, ticket replay returns 401, the redirect removes the ticket from the address bar, and the resulting cookie is HttpOnly and SameSite=Strict.
+14. Load `/` without a browser session. Confirm the fallback token form clears the input after exchange and that no token is stored in localStorage, sessionStorage, cookies readable by JavaScript, URLs or logs.
 
 ## 3. Extension development host
 
@@ -44,15 +46,15 @@ npm run build
 code --extensionDevelopmentPath="$PWD/packages/extension" "$PWD/packages/fixtures/generated"
 ```
 
-If the extension asks for authentication, run **Trace: Set Companion Client Token** and paste the token from the file path printed by the companion. Wait for the VS Code status bar to move through discovery/queue/index progress to **Trace index ready**. **Trace: Refresh Current Repository** must queue, not synchronously run, a rescan for the active repository; **Trace: Open Companion** must open the loopback dashboard.
+If the extension asks for authentication, run **Trace: Set Companion Client Token** and paste the token from the file path printed by the companion. Wait for the VS Code status bar to move through discovery/queue/index progress to **Trace index ready**. **Trace: Refresh Current Repository** must queue, not synchronously run, a rescan for the active repository.
 
-After loading any graph, switch to a non-default mode, close the Trace tab, and run **Trace: Open Trace**. The tab must be recreated with the last graph and mode without requiring another trace request. Close it again and click the primary Trace status item; it must reopen the same way. In a fresh Extension Development Host with no previous graph, **Trace: Open Trace** must trace the active PHP symbol, or show the existing “Open a PHP file” guidance when no editor is active.
+Focus an indexed fixture PHP symbol, then click the primary Trace status item. It must request an authenticated one-time launch and open the loopback browser UI. **Trace: Open Trace**, **Trace: Open Companion**, and each legacy exploration command must use the same launch boundary; the exploration commands also publish their corresponding mode. The extension must reject a launch URL on another origin or a non-loopback host.
 
 With a PHP editor active, confirm all six exploration commands below appear in the Command Palette and **Trace: Explore Selected Symbol** also appears in the editor context menu. The exploration commands should not be offered by those PHP-gated menus for a non-PHP editor.
 
 ### Fixture click-through tour
 
-Use the files below relative to `packages/fixtures/generated`. Put the cursor on the named declaration before running a command. The matching top tab should become active; clicking the same tab after the first trace exercises the equivalent webview action.
+Use the files below relative to `packages/fixtures/generated`. Put the cursor on the named declaration before running a command. The matching browser mode should become active; clicking another browser mode repeats the query against the same published editor context.
 
 | File and symbol | Command / tab | Expected evidence |
 | --- | --- | --- |
@@ -72,7 +74,7 @@ Use the files below relative to `packages/fixtures/generated`. Put the cursor on
 | `consumer-store/src/ReceiverInferenceShowcase.php` — `reassignedReceiver`, `dynamicMethod` | **Trace: Explore Selected Symbol** / **Callers** | Reassignment invalidates the earlier native `BaseOrder` type. The dynamic method retains `BaseOrder` only as diagnostic context. Both have empty target lists and no invented call edge. |
 | `consumer-store/src/ReceiverInferenceShowcase.php` — `containerGet`, `containerMake`, `containerResolve` | **Trace: Explore Selected Symbol** / **Callers** | Each chained `price` receiver is unresolved via `container-lookup`; configured runtime bindings are not guessed. Calls to the container API itself may be independently resolved and must not be confused with resolving its returned service. |
 | `consumer-store/src/ReceiverInferenceShowcase.php` — `runtimeClassString`, `reflectionFactory`, `magicFallback` | **Trace: Explore Selected Symbol** / **Callers** | Class-string/PHPDoc and magic-proxy types remain diagnostic-only candidates; reflection retains its documented upper bound. Resolution methods are `runtime-class-string`, `reflection` and `magic-call`, all with empty target lists. |
-| `shared-commerce/src/BaseOrder.php` — `BaseOrder::calculateTotal` | **Trace: Show Symbol History** / **History** | The timeline shows introduction, discount implementation, documentation-only, formatting-only, signature and later change/revert observations. Select an event to inspect author/date/category, open its read-only before/after diff, then **Check releases and consumers** for exact inclusion and active-behaviour evidence. |
+| `shared-commerce/src/BaseOrder.php` — `BaseOrder::calculateTotal` | **Trace: Show Symbol History** / **History** | The timeline shows introduction, discount implementation, documentation-only, formatting-only, signature and later change/revert observations. Select an event to inspect author/date/category and **Check releases and consumers** for exact inclusion and active-behaviour evidence. The browser must refuse source/diff transfer. |
 | `shared-commerce/src/Support/PricingMath.php` — `PricingMath::discountedSubtotal` | **Trace: Show Symbol History** / **History** | The timeline follows the old `PricingRules.php::applyDiscount` occurrence. `git-rename-diff` confirms the path mapping and `syntax-fingerprint-and-git-change` supplies possible method continuity; because both path and logical identity change, overall symbol lineage remains possible. |
 
 ### Receiver diagnostic matrix
@@ -103,42 +105,45 @@ For PHP `calls` and `calls-parent` relationships, read the graph from top to bot
 
 Repeat the first two rows after resizing to a narrow editor column. A pass requires the call direction to remain readable without relying on colour or node selection. Record reversed arrows, same-rank caller/callee placement, clipped arrowheads or unstable direction after expansion as failures, even when the relationship data itself is correct.
 
-On any populated graph, complete this UI pass:
+On any populated browser graph, complete this UI pass:
 
-1. Select a node in the graph, then the same node in the synchronized **Relationships** tree. Confirm the details panel shows kind, repository/revision/path, metadata and **Open source** when source exists.
-2. Select an edge. Confirm the collapsible Source, Evidence, Repository and Context sections show from/to, relationship type, confidence, repository, commit, source range, resolution method and limitations. **Open evidence** and **Open in VS Code** must select the recorded file/range.
+1. Select a node in the graph, then the corresponding relationship in the synchronized **Relationships** tree. Confirm the details panel shows the indexed symbol metadata and occurrence path/range without displaying source text.
+2. Select an edge. Confirm the evidence panel shows from/to, confidence, resolution method, path/range and limitations without fetching or embedding source bodies.
 3. Search for `calculateTotal`; non-matches should dim in the graph and disappear from the relationship list. Change **Confidence** between **All**, **Confirmed**, **Possible** and **Dependency only**. `LegacyPriceAdapter::copy` and `BaseOrder::create` provide possible PHPDoc/late-static evidence; the reporting project provides dependency-only evidence. The fixture has no positive **Unresolved** edge, so that filter should produce no matching relationship rather than relabel confirmed evidence.
-4. Select several nodes and edges, then use the selection breadcrumbs to return to an earlier selection. Double-click a node or use **Expand relationships** and confirm new relationships merge without losing the focus node.
-5. Exercise zoom in, zoom out, fit, pan and the minimap (clicking it fits the graph). Confirm the legend uses node labels/icons and confirmed/dashed/dotted line patterns in addition to colour.
-6. Resize Trace to a narrow editor column. Use the **Relationships** and **Details** toggles; pressing Escape should close either drawer without horizontal overflow.
-7. Confirm the footer reports indexed revision, indexed source versus local overlay, repository scope and partial/up-to-date state.
+4. Double-click a node and confirm expanded relationships merge without losing the focus node.
+5. Exercise zoom in, zoom out, fit and pan. Confirm confirmed, possible and dependency-only edges use line patterns in addition to colour.
+6. Resize the browser through desktop, tablet and narrow widths. Confirm the inspector and mode controls remain usable without page-wide horizontal overflow.
+7. Confirm the context bar and footer report editor age, indexed generation/revision, repository scope and partial/complete state.
 
 Fixture coverage limits: **Possible** is positively demonstrated by union/PHPDoc receiver candidates, PHPDoc type references, late-static and method-rename evidence. **Unresolved** and **Dynamic** are positively demonstrated as receiver diagnostics, not call edges, by invalidation, container lookup, runtime construction, reflection, magic and dynamic method cases. The fixture does not execute a container, reflection or magic method and does not create a false “possible” edge for them. It positively covers confirmed Git path-move evidence, possible combined symbol lineage, different-SHA stable-patch equivalence, revert, reapply and unavailable-basis activity. It does not create competing incomparable merge tips or exhaust the history bound; those remain explicit negative/limitation checks. The intermediate ancestor, PHPDoc object types/descriptions, native types, interface/trait provenance, late-static binding and impact chain are also positive examples.
 
 Verify live editor following:
 
-1. Leave the Trace tab visible and return focus to the PHP editor beside it.
-2. Move from `CheckoutService::total` to `Order::calculateTotal`; confirm the existing Trace tab updates without rerunning a command or stealing editor focus.
+1. Leave the Trace browser open and return focus to VS Code.
+2. Move from `CheckoutService::total` to `Order::calculateTotal`; confirm the browser updates without rerunning a command or stealing editor focus.
 3. Move from the method declaration to the `Order` class declaration; confirm the focus node changes from the method to the class.
-4. Switch Trace to another exploration mode, move the cursor again, and confirm that mode is preserved.
+4. Run a non-default exploration command, then move the cursor again and confirm that mode is published and preserved.
 5. Move rapidly across several lines and confirm only the final debounced selection becomes visible.
-6. Hide or close Trace, then move the cursor; confirm no follow request opens or reveals the panel.
-7. Run **Trace: Open Trace** and confirm the retained graph and current mode return; closing the tab must not make the view permanently unavailable.
-8. Set `trace.followActiveEditor` to `false` and confirm the graph remains fixed until a Trace command is run manually.
+6. Switch to a non-PHP editor or a file outside the workspace and confirm the published context clears rather than retaining a stale symbol.
+7. Set `trace.followActiveEditor` to `false` and confirm the context clears and stays fixed until a Trace command publishes a new context manually.
+8. Stop the companion, move the cursor, then restart it. Confirm publication is suppressed while disconnected and resumes after the status reconnects.
 
-Tab through the mode buttons, search, confidence selector, graph controls, relationship tree, inspector actions and timeline. Confirm visible focus states and that selecting a relationship in the tree updates the same inspector as selecting its graph edge.
+Tab through the mode buttons, search, confidence selector, graph controls, relationship tree, inspector and timeline. Confirm visible focus states and that selecting a relationship in the tree updates the same inspector as selecting its graph edge.
 
-Switch between a built-in light theme, dark theme and a high-contrast theme while Trace remains open. Confirm all chrome, text, controls, graph nodes, edge labels, semantic colours, notifications and focus states inherit VS Code tokens immediately. The selected node must remain distinguishable, graph zoom/pan must not jump, and resizing the editor column must refit the graph without clipping nodes.
+Switch VS Code between built-in light, dark and high-contrast themes. Confirm the browser follows the bounded theme kind and keeps text, controls, graph nodes, edge labels, semantic states, notifications and focus indicators readable. The selected node must remain distinguishable and resizing must not clip the primary graph controls.
 
-## 4. Local overlay
+## 4. Browser context privacy and project-write boundary
 
-Edit the return expression in `consumer-store/src/Order.php` without saving.
+Use browser developer tools while moving between fixture PHP symbols.
 
-1. Trace again and confirm **Local overlay** is visible.
-2. Edit rapidly and confirm live follow refreshes the current selection and only the latest debounced request becomes visible.
-3. Save or revert the edit and confirm overlay evidence is invalidated.
-4. Confirm no unsaved source was added to history or persisted after companion restart.
-5. Confirm the UI says cross-file working-tree analysis is partial.
+1. Inspect `POST /v1/editor-context`. It may contain repository root/ID, relative path, exact commit, dirty flag, cursor range, mode and the bounded theme kind. It must not contain selected-text contents, `documentText`, `documentVersion`, a PHP source sentinel, or any unsaved line text.
+2. Inspect browser `POST /v1/trace` responses, including History. They may contain paths, symbols, evidence summaries and revisions, but must not contain `beforeSource`, `afterSource`, full file contents or a PHP source sentinel.
+3. Edit without saving. Confirm the browser remains on the published indexed generation; unsaved source is neither uploaded nor presented as an overlay. Save only in the disposable fixture when testing refresh.
+4. Confirm the browser never calls `/v1/source`. Paths and ranges are evidence metadata, not permission to transfer source text into the browser.
+5. Before scanning a disposable repository, save `git status --porcelain=v1 --untracked-files=all` and a file path/content-hash inventory outside `.git` under `/tmp`. Repeat after indexing, refresh, cancellation and browser exploration. Both comparisons must be identical. Companion SQLite, browser-session and cache changes must occur only under `TRACE_DATA_DIR`.
+6. Confirm repository removal in `/admin` removes companion-owned state only; the configured local directory and its contents remain untouched.
+
+Treat any source body in browser network payloads, new/changed scanned-project file, checkout/reset/stash, or project-local Trace state as a privacy failure.
 
 ## 5. Symbol history
 
@@ -153,7 +158,7 @@ Verify:
 - The whitespace commit is formatting only.
 - The tax option is a signature/contract change.
 - The trait call-site change remains a `BaseOrder::calculateTotal` implementation observation; trait lineage is shown on the trait method's own history rather than inferred from this caller.
-- Before/after source and accessible diff match the selected event.
+- The browser timeline shows category, summary, author/date and lineage metadata, but the sanitized response contains no before/after source bodies. Clicking **Open before/after diff** must show the browser privacy guidance instead of fetching source.
 - For a selected event, **Check releases and consumers** shows containing tags from both `main` and `release/1.x` without claiming one globally linear “first release.”
 
 Then trace `Company\Commerce\Support\PricingMath::discountedSubtotal` and verify the two lineage events at `historyEvidence.lineage.commit`:
@@ -191,7 +196,7 @@ jq '.expectations.historicalComparison
   > /tmp/trace-historical-comparison.json
 ```
 
-Send that JSON to authenticated `POST /v1/trace/compare` and record it as companion API evidence. Then verify the same basis through the extension as a separate rendered-webview layer: trace `BaseOrder` in **Impact**, choose **Compare**, enter all six full commits from the manifest's before/after maps, and choose **Compare relationships**.
+Send that JSON to authenticated `POST /v1/trace/compare` and record it as companion API evidence. Then verify the same basis through the browser as a separate rendered layer: trace `BaseOrder` in **Impact**, choose **Compare**, enter all six full commits from the manifest's before/after maps, and choose **Compare relationships**.
 
 | Check | Expected result |
 | --- | --- |
@@ -202,7 +207,7 @@ Send that JSON to authenticated `POST /v1/trace/compare` and record it as compan
 | No latest fallback | The comparison-after reporting commit is `commits.dependencyUpdate`, whose lock points at the new package commit. Reporting repository HEAD is the later `legacyTrackRestore`, whose lock points back to v1. The after graph must use the former; using HEAD must fail this check. |
 | Selection identity | Each clean selection's repository/commit pair exactly equals its own side's revision-map entry. Both graphs retain the same logical `BaseOrder` focus while occurrences remain revision-specific. |
 
-In the rendered comparison, confirm the explicit basis table lists all three repositories and both resolved commits. Switch between **Added**, **Removed**, **Changed** and **Unchanged**; counts and graph contents must agree with the API response, changed-field details must remain inspectable, and **Close comparison** must restore the original graph. The dialog must reject abbreviated commits and must require both sides for every listed repository before sending a request.
+In the rendered comparison, confirm the explicit basis table lists all three repositories and both resolved commits. Switch between **Added**, **Removed**, **Changed** and **Unchanged**; counts and graph contents must agree with the API response, changed-field details must remain inspectable, and **Close comparison** must restore the original graph. The form must reject abbreviated commits and require both sides for every listed repository before sending a request. Its cookie-authenticated response must also omit all history `beforeSource`/`afterSource` bodies.
 
 Run these negative cases against a disposable copy of the request:
 
@@ -249,7 +254,7 @@ First run without a GitHub credential. `expectations.githubAssociations.expected
 
 With a least-privilege credential, add one explicitly selected GitHub repository and verify discovery filters, private access, manual refresh and remote-link opening. For a pull request, verify the result records the exact repository/repository URL, selected commit, PR URL, confirmed confidence, evidence and limitations; the evidence method must be the commit-to-pull-request API and must not claim merge from association alone. For a release, verify the exact local tag name/tag commit remain the basis, confidence is possible, and the limitation says the remote tag object/commit was not independently verified; same-tag-name publication must not be described as exact commit equality or deployment.
 
-Exercise partial failure without changing local Git evidence: make one association request fail or exceed its configured bound while another succeeds. The response must retain local release/consumer inclusion, retain successful associations, and append a sanitized association-level limitation for the failure/bound. Verify release enrichment considers at most 25 exact local tags, uses no more than five concurrent lookups and returns within the 30-second overall budget with unfinished work represented as limitations. Confirm the token never appears in the dashboard HTML, extension webview, logs, clone URL display, evidence, limitation text or API response.
+Exercise partial failure without changing local Git evidence: make one association request fail or exceed its configured bound while another succeeds. The response must retain local release/consumer inclusion, retain successful associations, and append a sanitized association-level limitation for the failure/bound. Verify release enrichment considers at most 25 exact local tags, uses no more than five concurrent lookups and returns within the 30-second overall budget with unfinished work represented as limitations. Confirm the token never appears in browser/admin HTML, logs, clone URL display, evidence, limitation text or API response.
 
 This is separate external-integration evidence. If no credential/network is available, report it as **not run**, not passed from fixture results.
 
@@ -260,7 +265,7 @@ npm run package:extension
 code --install-extension packages/extension/trace-vscode-*.vsix
 ```
 
-Launch a normal VS Code window, repeat the origin and consumer flows, then inspect the extension-host and webview developer consoles. Record product errors separately from unrelated extension/third-party noise.
+Launch a normal VS Code window, repeat the origin and consumer flows in the companion browser, then inspect the extension-host and browser developer consoles. Record product errors separately from unrelated extension/third-party noise.
 
 ## 11. Large-workspace scanner benchmark
 
@@ -287,7 +292,7 @@ Verify:
 
 This is scanner I/O/hash evidence. PHP parsing, SQLite publication, queue cancellation/retry, cache reuse, and end-to-end companion performance remain separate checks.
 
-## 12. CodeLens counts and query benchmark
+## 12. Bounded count API benchmark
 
 Start a fresh fixture-mode companion, then create a private request workload from the exact active shared-package commit:
 
@@ -324,14 +329,7 @@ Verify:
 7. Search the report and stderr for the workload's repository ID, commit, path and symbol. None may appear. The workload itself remains sensitive and must stay under `/tmp`.
 8. Publish a new generation or change a package mapping, then repeat. The first following request must rebuild; old item values must not leak across the new cache identity.
 
-Then verify the rendered extension layer separately:
-
-1. With `trace.codeLens.enabled` true, open a saved fixture PHP file in the local workspace. With the default zero additional delay, confirm the extension sends one VS Code-coalesced batch for the document, never more than the default 120 symbols or hard maximum 200.
-2. Confirm zero values are hidden. Non-zero **callers** and **package consumers** render as separate labels, and a partial result includes an explicit partial suffix.
-3. Edit the document. Lenses must disappear immediately and the in-flight request must abort. Save it; lenses remain suppressed while the refreshed repository generation is queued/running and return only after that generation is ready.
-4. Change `trace.codeLens.delayMs` and `trace.codeLens.maxSymbolsPerDocument`, then confirm debounce and cap behavior change without exceeding 200. Disable `trace.codeLens.enabled` and confirm no requests/lenses remain.
-5. Move the active cursor elsewhere before clicking a lens. The command must still use the lens's recorded document URI and symbol position.
-6. Publish another generation and confirm the repository's extension-side cache clears; an old-generation response must not reappear after the new one.
+The browser-primary extension does not register a CodeLens provider or contribute `trace.codeLens.*` settings. Treat this section as companion API/performance evidence only; do not claim an editor-rendered CodeLens layer.
 
 For deterministic high-scale evidence, run the synthetic backend comparison with peak-RSS capture:
 

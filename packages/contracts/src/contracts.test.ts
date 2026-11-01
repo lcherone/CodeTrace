@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { ChangeInclusionResponseSchema, CodeLensCountsRequestSchema, CodeLensCountsResponseSchema, ComposerDependencySchema, GitHubAssociationsSchema, GraphResponseSchema, HistoryEventSchema, PROTOCOL_VERSION, SelectionSchema, TemporalGraphComparisonRequestSchema } from "./index.js";
+import { BrowserLaunchResponseSchema, ChangeInclusionResponseSchema, CodeLensCountsRequestSchema, CodeLensCountsResponseSchema, ComposerDependencySchema, EditorContextResponseSchema, EditorContextUpdateRequestSchema, GitHubAssociationsSchema, GraphResponseSchema, HistoryEventSchema, PROTOCOL_VERSION, SelectionSchema, TemporalGraphComparisonRequestSchema } from "./index.js";
 
 test("selection requires revision-qualified repository context", () => {
   const result = SelectionSchema.safeParse({
@@ -11,6 +11,16 @@ test("selection requires revision-qualified repository context", () => {
     selectedText: "calculateTotal",
   });
   assert.equal(result.success, true);
+});
+
+test("browser launch and live editor context remain revision and generation qualified", () => {
+  const selection = { repositoryPath: "/repo", relativePath: "src/Order.php", revision: { repositoryId: "client", commit: "a".repeat(40), dirty: false }, range: { startLine: 5, startColumn: 0, endLine: 5, endColumn: 10 } };
+  assert.equal(EditorContextUpdateRequestSchema.safeParse({ protocolVersion: PROTOCOL_VERSION, clientId: "vscode-window-1", context: { selection, mode: "impact" } }).success, true);
+  assert.equal(EditorContextUpdateRequestSchema.safeParse({ protocolVersion: PROTOCOL_VERSION, clientId: "vscode-window-1", context: { selection: { ...selection, symbolHint: "Soho\\Pos\\Model\\OrderTrait" }, mode: "impact" } }).success, true);
+  assert.equal(EditorContextUpdateRequestSchema.safeParse({ protocolVersion: PROTOCOL_VERSION, clientId: "vscode-window-1", context: { selection: { ...selection, symbolHint: "return $secret;" }, mode: "impact" } }).success, false);
+  assert.equal(EditorContextUpdateRequestSchema.safeParse({ protocolVersion: PROTOCOL_VERSION, clientId: "vscode-window-1", context: { selection: { ...selection, selectedText: "secret", documentText: "<?php echo $secret;", documentVersion: 2 }, mode: "impact" } }).success, false);
+  assert.equal(EditorContextResponseSchema.safeParse({ protocolVersion: PROTOCOL_VERSION, version: 4, context: { clientId: "vscode-window-1", selection, mode: "impact", generation: 7, receivedAt: new Date().toISOString() } }).success, true);
+  assert.equal(BrowserLaunchResponseSchema.safeParse({ protocolVersion: PROTOCOL_VERSION, url: "http://127.0.0.1:47173/?ticket=opaque", expiresAt: new Date().toISOString() }).success, true);
 });
 
 test("graph rejects edges without evidence", () => {

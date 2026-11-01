@@ -131,7 +131,7 @@ CodeLens cache identity includes all active generation IDs plus package mappings
 
 Cold and warm evidence are process-local. Restarting the companion, publishing any active generation or changing mappings invalidates the cache. OS filesystem cache warmth is a separate layer and is not controlled by this harness.
 
-The VS Code provider adds a separate document-scoped layer: enabled by `trace.codeLens.enabled`, saved local PHP files only, no additional delay by default, one batch per document, 120 symbols by default and a hard cap of 200. VS Code already coalesces provider requests, while `trace.codeLens.delayMs` remains available for noisy hosts. Its cache key includes document version, repository ID/commit and response generation. Editing cancels the request and removes stale lenses; saving does not restore them until the repository's refreshed generation is ready. Only non-zero caller/consumer counts render, and partial counts are labelled rather than silently appearing complete.
+The browser-primary extension no longer registers a CodeLens provider or exposes CodeLens settings. The endpoint and harness remain useful for bounded query-performance regression testing, but they are not a current user-interface promise.
 
 ### Recorded synthetic high-scale profile
 

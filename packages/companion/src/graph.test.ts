@@ -109,6 +109,8 @@ test("origin and impact traces scope cross-repository work away from unrelated e
     assert.equal(graph.nodes.some((node) => node.label.startsWith("Client\\UnrelatedOrder")), false);
     assert.equal(graph.freshness.partial, false);
     assert.ok(elapsedMs < 1_500, `scoped origin trace should stay below 1500ms, took ${elapsedMs.toFixed(1)}ms`);
+    const importedReference = service.trace({ ...selection, range: { startLine: 20, startColumn: 4, endLine: 20, endColumn: 19 }, selectedText: "Company\\Shared\\BaseOrder" }, "origin", 100);
+    assert.equal(importedReference.nodes.find((node) => node.id === importedReference.focusNodeId)?.label, "Company\\Shared\\BaseOrder");
     const impact = await service.traceAsync(selection, "impact", 100);
     assert.ok(impact.nodes.some((node) => node.label === "Company\\Shared\\BaseOrder"));
     assert.equal(impact.nodes.some((node) => node.label.startsWith("Client\\UnrelatedOrder")), false);

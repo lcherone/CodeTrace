@@ -1,77 +1,80 @@
-import type { Selection } from "@trace/contracts";
 import { execFile } from "node:child_process";
-import { realpath } from "node:fs/promises";
-import { dirname, relative } from "node:path";
+import { relative } from "node:path";
 import { promisify } from "node:util";
 import * as vscode from "vscode";
+import { phpSymbolHint, type PublicEditorPosition } from "./activeContextSupport";
+import type { CompanionClient, CompanionRepository } from "./client";
+import { repositoryRootForPath } from "./repositoryDiscovery";
 
 const execFileAsync = promisify(execFile);
+type RepositoryIdentity = { repositoryId: string; commit: string; generation: number };
 
-export async function createSelection(editor: vscode.TextEditor): Promise<Selection> {
-  if (editor.document.languageId !== "php") throw new Error("Trace currently supports PHP documents.");
-  const workspaceFolder = vscode.workspace.getWorkspaceFolder(editor.document.uri);
-  if (!workspaceFolder || editor.document.uri.scheme !== "file") throw new Error("Open the PHP file inside a local workspace folder before tracing.");
-  // `git -C` requires a directory. The active document URI is a file path,
-  // which only surfaced in a real Extension Development Host because unit
-  // fixtures call the lower-level client directly.
-  const repositoryPath = await git(dirname(editor.document.uri.fsPath), ["rev-parse", "--show-toplevel"]);
-  const commit = await git(repositoryPath, ["rev-parse", "HEAD"]);
-  const branchOutput = await git(repositoryPath, ["branch", "--show-current"]);
-  const dirtyOutput = await git(repositoryPath, ["status", "--porcelain", "--", editor.document.uri.fsPath]);
-  const selection = editor.selection.isEmpty
-    ? editor.document.getWordRangeAtPosition(editor.selection.active) ?? new vscode.Range(editor.selection.active, editor.selection.active)
-    : editor.selection;
-  const normalizedRoot = await realpath(repositoryPath);
-  const normalizedFile = await realpath(editor.document.uri.fsPath);
-  const relativePath = relative(normalizedRoot, normalizedFile).replaceAll("\\", "/");
-  if (relativePath.startsWith("../") || relativePath === "..") throw new Error("The active file is outside the containing Git repository.");
-  return {
-    repositoryPath: normalizedRoot,
-    relativePath,
-    revision: {
-      repositoryId: normalizedRoot,
-      commit,
-      ...(branchOutput ? { branch: branchOutput } : {}),
-      dirty: Boolean(dirtyOutput) || editor.document.isDirty,
-    },
-    range: {
-      startLine: selection.start.line + 1,
-      startColumn: selection.start.character,
-      endLine: selection.end.line + 1,
-      endColumn: selection.end.character,
-    },
-    selectedText: editor.document.getText(selection),
-    ...(editor.document.isDirty ? { documentText: editor.document.getText(), documentVersion: editor.document.version } : {}),
-  };
+export class EditorContextResolver {
+  private readonly identities = new Map<string, RepositoryIdentity>();
+
+  constructor(private readonly client: CompanionClient) {}
+
+  clear(): void {
+    this.identities.clear();
+  }
+
+  async resolve(editor: vscode.TextEditor | undefined, signal: AbortSignal): Promise<PublicEditorPosition | undefined> {
+    if (!editor || !eligibleEditor(editor)) return undefined;
+    const root = await repositoryRootForPath(editor.document.uri.fsPath, signal);
+    if (!root || signal.aborted) return undefined;
+    const identity = await this.repositoryIdentity(root, signal);
+    if (!identity || signal.aborted) return undefined;
+    const relativePath = relative(root, editor.document.uri.fsPath).replaceAll("\\", "/");
+    if (relativePath === ".." || relativePath.startsWith("../")) return undefined;
+    const selection = editor.selection.isEmpty
+      ? editor.document.getWordRangeAtPosition(editor.selection.active) ?? editor.selection
+      : editor.selection;
+    const symbolHint = phpSymbolHint(editor.document.getText(selection), editor.document.getText());
+    return {
+      repositoryPath: root,
+      repositoryId: identity.repositoryId,
+      relativePath,
+      revision: { commit: identity.commit, dirty: editor.document.isDirty },
+      range: {
+        startLine: selection.start.line + 1,
+        startColumn: selection.start.character,
+        endLine: selection.end.line + 1,
+        endColumn: selection.end.character,
+      },
+      ...(symbolHint ? { symbolHint } : {}),
+    };
+  }
+
+  private async repositoryIdentity(root: string, signal: AbortSignal): Promise<RepositoryIdentity | undefined> {
+    const cached = this.identities.get(root);
+    if (cached) return cached;
+    const repositories = await this.client.repositories(signal);
+    const repository = repositories.find((candidate) => candidate.root === root && candidate.activeGeneration !== undefined);
+    if (!repository || signal.aborted) return undefined;
+    const commit = await headCommit(root, signal);
+    const identity = identityFromRepository(repository, commit);
+    this.identities.set(root, identity);
+    return identity;
+  }
 }
 
-async function git(cwdOrPath: string, args: string[]): Promise<string> {
-  const { stdout } = await execFileAsync("git", ["-C", cwdOrPath, ...args], {
+function eligibleEditor(editor: vscode.TextEditor): boolean {
+  return editor.document.languageId === "php"
+    && editor.document.uri.scheme === "file"
+    && Boolean(vscode.workspace.getWorkspaceFolder(editor.document.uri));
+}
+
+function identityFromRepository(repository: CompanionRepository, commit: string): RepositoryIdentity {
+  return { repositoryId: repository.id, commit, generation: repository.activeGeneration ?? 0 };
+}
+
+async function headCommit(root: string, signal: AbortSignal): Promise<string> {
+  const { stdout } = await execFileAsync("git", ["-C", root, "rev-parse", "HEAD"], {
     encoding: "utf8",
     timeout: 10_000,
-    maxBuffer: 1024 * 1024,
+    maxBuffer: 64 * 1024,
     windowsHide: true,
+    signal,
   });
   return stdout.trim();
-}
-
-export class OverlayInvalidator implements vscode.Disposable {
-  private timer: NodeJS.Timeout | undefined;
-  private readonly emitter = new vscode.EventEmitter<vscode.TextDocument>();
-  readonly onDidInvalidate = this.emitter.event;
-  private readonly subscription: vscode.Disposable;
-
-  constructor(delayMs = 250) {
-    this.subscription = vscode.workspace.onDidChangeTextDocument(({ document }) => {
-      if (document.languageId !== "php") return;
-      if (this.timer) clearTimeout(this.timer);
-      this.timer = setTimeout(() => this.emitter.fire(document), delayMs);
-    });
-  }
-
-  dispose(): void {
-    if (this.timer) clearTimeout(this.timer);
-    this.subscription.dispose();
-    this.emitter.dispose();
-  }
 }
