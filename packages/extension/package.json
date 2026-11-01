@@ -1,0 +1,229 @@
+{
+  "name": "trace-vscode",
+  "displayName": "Trace",
+  "description": "Explore PHP symbol origins, callers, consumers, and history.",
+  "version": "0.1.0",
+  "publisher": "trace-dev",
+  "private": true,
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/lcherone/CodeTrace.git",
+    "directory": "packages/extension"
+  },
+  "engines": {
+    "vscode": "^1.95.0"
+  },
+  "categories": [
+    "Other",
+    "Programming Languages",
+    "Visualization"
+  ],
+  "keywords": [
+    "php",
+    "composer",
+    "code graph",
+    "history",
+    "dependencies"
+  ],
+  "main": "./out/extension.js",
+  "activationEvents": [
+    "onStartupFinished",
+    "onLanguage:php",
+    "onCommand:trace.openTrace",
+    "onCommand:trace.openCompanion"
+  ],
+  "contributes": {
+    "commands": [
+      {
+        "command": "trace.openTrace",
+        "title": "Trace: Open Trace",
+        "icon": "$(references)"
+      },
+      {
+        "command": "trace.exploreSelectedSymbol",
+        "title": "Trace: Explore Selected Symbol",
+        "icon": "$(references)"
+      },
+      {
+        "command": "trace.showParentImplementation",
+        "title": "Trace: Show Parent Implementation"
+      },
+      {
+        "command": "trace.showOverrides",
+        "title": "Trace: Show Overrides"
+      },
+      {
+        "command": "trace.findCallers",
+        "title": "Trace: Find Callers"
+      },
+      {
+        "command": "trace.findConsumerProjects",
+        "title": "Trace: Find Consumer Projects"
+      },
+      {
+        "command": "trace.showSymbolHistory",
+        "title": "Trace: Show Symbol History"
+      },
+      {
+        "command": "trace.refreshCurrentRepository",
+        "title": "Trace: Refresh Current Repository"
+      },
+      {
+        "command": "trace.openCompanion",
+        "title": "Trace: Open Companion"
+      },
+      {
+        "command": "trace.setClientToken",
+        "title": "Trace: Set Companion Client Token"
+      }
+    ],
+    "menus": {
+      "editor/context": [
+        {
+          "command": "trace.exploreSelectedSymbol",
+          "when": "editorLangId == php",
+          "group": "navigation@20"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "trace.exploreSelectedSymbol",
+          "when": "editorLangId == php"
+        },
+        {
+          "command": "trace.showParentImplementation",
+          "when": "editorLangId == php"
+        },
+        {
+          "command": "trace.showOverrides",
+          "when": "editorLangId == php"
+        },
+        {
+          "command": "trace.findCallers",
+          "when": "editorLangId == php"
+        },
+        {
+          "command": "trace.findConsumerProjects",
+          "when": "editorLangId == php"
+        },
+        {
+          "command": "trace.showSymbolHistory",
+          "when": "editorLangId == php"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "Trace",
+      "properties": {
+        "trace.companionUrl": {
+          "type": "string",
+          "default": "http://127.0.0.1:47173",
+          "description": "Loopback URL of the Trace companion. Non-loopback URLs are rejected."
+        },
+        "trace.requestTimeoutMs": {
+          "type": "number",
+          "default": 30000,
+          "minimum": 1000,
+          "maximum": 300000,
+          "description": "Companion request timeout in milliseconds."
+        },
+        "trace.maxGraphNodes": {
+          "type": "number",
+          "default": 180,
+          "minimum": 20,
+          "maximum": 1000,
+          "description": "Maximum nodes accepted in one graph response."
+        },
+        "trace.followActiveEditor": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically refresh an open, visible Trace graph when the active PHP editor or cursor selection changes."
+        },
+        "trace.followDelayMs": {
+          "type": "number",
+          "default": 300,
+          "minimum": 100,
+          "maximum": 5000,
+          "description": "Debounce delay before Trace follows the active PHP editor selection."
+        },
+        "trace.autoScanWorkspace": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically discover and queue local Git repositories containing workspace PHP or Composer projects."
+        },
+        "trace.scanDiscoveryDelayMs": {
+          "type": "number",
+          "default": 800,
+          "minimum": 0,
+          "maximum": 30000,
+          "description": "Debounce delay before automatic workspace and Composer project discovery."
+        },
+        "trace.scanChangeDelayMs": {
+          "type": "number",
+          "default": 1500,
+          "minimum": 100,
+          "maximum": 60000,
+          "description": "Coalescing delay before a changed PHP or Composer file refreshes its repository index."
+        },
+        "trace.scanMaxComposerManifests": {
+          "type": "number",
+          "default": 250,
+          "minimum": 1,
+          "maximum": 5000,
+          "description": "Maximum Composer manifests inspected during one workspace discovery pass. Discovery reports when this limit is reached."
+        },
+        "trace.codeLens.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show cached Trace caller and package-consumer counts above indexed PHP symbols. Unsaved or generation-stale documents never show lenses."
+        },
+        "trace.codeLens.delayMs": {
+          "type": "number",
+          "default": 0,
+          "minimum": 0,
+          "maximum": 2000,
+          "description": "Debounce delay before a saved PHP document requests one batched CodeLens count query."
+        },
+        "trace.codeLens.maxSymbolsPerDocument": {
+          "type": "number",
+          "default": 120,
+          "minimum": 1,
+          "maximum": 200,
+          "description": "Maximum PHP symbols included in one CodeLens count batch. The companion hard limit is 200."
+        },
+        "trace.trustedSourceRoots": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "description": "Additional absolute roots from which Trace may open indexed source."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "build": "node esbuild.mjs",
+    "watch": "node esbuild.mjs --watch",
+    "preview": "npm run build && node preview-server.mjs",
+    "check": "tsc -p tsconfig.json --noEmit",
+    "test": "tsx --test \"src/**/*.test.ts\"",
+    "package": "npm run build && vsce package --no-dependencies",
+    "clean": "rm -rf out"
+  },
+  "dependencies": {
+    "@trace/contracts": "0.1.0",
+    "@vscode/codicons": "^0.0.46-24",
+    "cytoscape": "^3.33.1",
+    "php-parser": "^3.2.5",
+    "zod": "^4.1.12"
+  },
+  "devDependencies": {
+    "@types/cytoscape": "^3.21.9",
+    "@types/vscode": "^1.95.0",
+    "@vscode/vsce": "^4.1.0",
+    "esbuild": "^0.25.11",
+    "tsx": "^4.20.6"
+  }
+}

@@ -1,0 +1,25 @@
+{
+  "name": "trace",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Trace code relationships and symbol history across PHP and Composer repositories.",
+  "workspaces": [
+    "packages/*"
+  ],
+  "engines": {
+    "node": ">=22.13.0"
+  },
+  "scripts": {
+    "build": "npm run build --workspaces --if-present",
+    "check": "npm run check --workspaces --if-present",
+    "test": "npm run test --workspaces --if-present",
+    "clean": "npm run clean --workspaces --if-present",
+    "dev:companion": "npm run dev -w @trace/companion",
+    "fixture": "npm run generate -w @trace/fixtures",
+    "package:extension": "npm run package -w trace-vscode"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.0",
+    "typescript": "^5.9.3"
+  }
+}

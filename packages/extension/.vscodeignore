@@ -1,0 +1,8 @@
+src/**
+esbuild.mjs
+tsconfig.json
+**/*.map
+**/*.test.*
+out/preview*
+preview-server.mjs
+.gitignore

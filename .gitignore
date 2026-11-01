@@ -1,0 +1,11 @@
+node_modules/
+dist/
+coverage/
+*.vsix
+*.log
+.DS_Store
+.trace/
+tmp/
+packages/fixtures/generated/
+packages/extension/.vscode-test/
+.playwright-cli/

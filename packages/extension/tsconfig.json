@@ -1,0 +1,15 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "module": "CommonJS",
+    "moduleResolution": "Node",
+    "lib": ["ES2022", "DOM"],
+    "noEmit": true,
+    "baseUrl": ".",
+    "paths": {
+      "@trace/contracts": ["../contracts/src/index.ts"]
+    },
+    "types": ["node", "vscode"]
+  },
+  "include": ["src/**/*.ts"]
+}

@@ -1,0 +1,42 @@
+{
+  "stateDirectory": "/absolute/path/to/private/trace-state",
+  "server": {
+    "host": "127.0.0.1",
+    "port": 47173
+  },
+  "repositories": [
+    {
+      "id": "company-commerce",
+      "kind": "local",
+      "path": "/absolute/path/to/company-commerce",
+      "defaultBranch": "main",
+      "additionalBranches": ["release/1.x"],
+      "include": ["src/**/*.php", "composer.json", "composer.lock"],
+      "exclude": ["vendor/**", "var/**", "dist/**"]
+    },
+    {
+      "id": "client-store",
+      "kind": "github",
+      "owner": "example-org",
+      "name": "store",
+      "defaultBranch": "main"
+    }
+  ],
+  "githubDiscovery": {
+    "organisations": ["example-org"],
+    "include": ["commerce-*", "store"],
+    "exclude": ["*-archive"]
+  },
+  "packageMappings": [
+    {
+      "packageName": "company/commerce",
+      "repositoryId": "company-commerce",
+      "packageRoot": "."
+    }
+  ],
+  "indexing": {
+    "maxConcurrency": 2,
+    "history": "lazy",
+    "maxGraphExpansion": 200
+  }
+}

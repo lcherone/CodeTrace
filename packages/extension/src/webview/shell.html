@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8">
+    <meta http-equiv="Content-Security-Policy" content="{{CSP}}">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="Trace PHP symbol relationships, consumers, evidence, and history.">
+    <link rel="stylesheet" href="{{STYLE_URI}}">
+    <title>Trace</title>
+  </head>
+  <body>
+    <div class="app" id="app">
+      <header class="topbar">
+        <div class="brand" aria-label="Trace code explorer"><i class="codicon codicon-references brand-mark" aria-hidden="true"></i>Trace</div>
+        <nav class="modes" aria-label="Exploration mode">
+          <button class="mode" data-mode="origin" aria-label="Origin" title="Origin"><i class="codicon codicon-git-merge" aria-hidden="true"></i><span>Origin</span></button>
+          <button class="mode" data-mode="inheritance" aria-label="Inheritance" title="Inheritance"><i class="codicon codicon-type-hierarchy-sub" aria-hidden="true"></i><span>Inheritance</span></button>
+          <button class="mode" data-mode="callers" aria-label="Callers" title="Callers"><i class="codicon codicon-references" aria-hidden="true"></i><span>Callers</span></button>
+          <button class="mode" data-mode="consumers" aria-label="Consumers" title="Consumers"><i class="codicon codicon-package" aria-hidden="true"></i><span>Consumers</span></button>
+          <button class="mode" data-mode="impact" aria-label="Impact" title="Impact"><i class="codicon codicon-pulse" aria-hidden="true"></i><span>Impact</span></button>
+          <button class="mode" data-mode="history" aria-label="History" title="History"><i class="codicon codicon-history" aria-hidden="true"></i><span>History</span></button>
+        </nav>
+        <div class="top-actions">
+          <button class="compare-button" id="open-comparison" type="button" aria-label="Compare revisions" title="Compare revisions"><i class="codicon codicon-git-compare" aria-hidden="true"></i><span>Compare</span></button>
+          <label class="search"><span class="sr-only">Search graph</span><i class="codicon codicon-search" aria-hidden="true"></i><input id="search" type="search" placeholder="Search relationships" autocomplete="off"></label>
+          <label class="filter-label"><i class="codicon codicon-filter" aria-hidden="true"></i><span>Confidence</span><select id="confidence" aria-label="Confidence"><option value="all">All</option><option value="confirmed">Confirmed</option><option value="possible">Possible</option><option value="dependency-only">Dependency only</option><option value="unresolved">Unresolved</option></select></label>
+        </div>
+      </header>
+      <nav class="breadcrumbs" id="breadcrumbs" aria-label="Navigation history"></nav>
+      <main class="workspace">
+        <aside class="rail panel" aria-label="Relationships">
+          <div class="panel-title"><h2>Relationships</h2><span><span class="count" id="relationship-count">0</span><button class="icon-button" id="focus-search" title="Filter relationships" aria-label="Filter relationships"><i class="codicon codicon-filter" aria-hidden="true"></i></button></span></div>
+          <nav class="relationship-tree" id="relationship-tree" aria-label="Relationship list"></nav>
+        </aside>
+        <section class="canvas-wrap" aria-label="Relationship graph">
+          <section class="comparison-summary" id="comparison-summary" aria-label="Temporal comparison bases" hidden>
+            <div class="comparison-bases" id="comparison-bases"></div>
+            <div class="comparison-states" id="comparison-states" role="group" aria-label="Relationship change state"></div>
+            <button class="icon-button" id="close-comparison" type="button" title="Return to current graph" aria-label="Return to current graph"><i class="codicon codicon-close" aria-hidden="true"></i></button>
+          </section>
+          <button class="panel-toggle panel-toggle-left" id="toggle-relationships" aria-label="Show relationships" aria-expanded="false"><i class="codicon codicon-list-tree" aria-hidden="true"></i><span>Relationships</span></button>
+          <button class="panel-toggle panel-toggle-right" id="toggle-details" aria-label="Show details" aria-expanded="false"><i class="codicon codicon-layout-sidebar-right" aria-hidden="true"></i><span>Details</span></button>
+          <button class="comparison-toggle" id="open-comparison-mobile" type="button" aria-label="Compare revisions"><i class="codicon codicon-git-compare" aria-hidden="true"></i><span>Compare</span></button>
+          <div class="canvas-tools" role="toolbar" aria-label="Graph controls">
+            <button id="zoom-in" title="Zoom in" aria-label="Zoom in"><i class="codicon codicon-zoom-in" aria-hidden="true"></i></button>
+            <button id="zoom-out" title="Zoom out" aria-label="Zoom out"><i class="codicon codicon-zoom-out" aria-hidden="true"></i></button>
+            <button id="fit" title="Fit graph" aria-label="Fit graph"><i class="codicon codicon-screen-full" aria-hidden="true"></i></button>
+          </div>
+          <div id="graph" role="application" aria-label="Interactive relationship graph"></div>
+          <div class="legend" id="legend" aria-label="Graph legend"></div>
+          <div class="canvas-state" id="canvas-state" hidden></div>
+        </section>
+        <aside class="inspector panel" aria-label="Selection details">
+          <div class="panel-title"><h2 id="detail-kind">Details</h2><span class="confidence" id="detail-confidence"></span></div>
+          <div id="details" class="details empty"><p>Select a node or relationship to inspect its evidence.</p></div>
+        </aside>
+      </main>
+      <section class="history" aria-label="Symbol history">
+        <div class="history-heading"><h2>History</h2><span id="history-symbol"></span><span class="history-count" id="history-count">0 events</span></div>
+        <div class="timeline" id="timeline"></div>
+        <canvas class="graph-minimap" id="graph-minimap" width="186" height="76" aria-label="Graph minimap" role="img" title="Click to fit graph"></canvas>
+      </section>
+      <footer class="statusbar">
+        <span class="status-item"><i class="codicon codicon-pass-filled" aria-hidden="true"></i><span id="index-status">Waiting for graph</span></span>
+        <span class="status-item"><i class="codicon codicon-file-code" aria-hidden="true"></i><span id="overlay-status">Local overlay: none</span></span>
+        <span class="status-item"><i class="codicon codicon-repo" aria-hidden="true"></i><span id="scope-status">Scope: 0 repositories</span></span>
+        <span class="status-spacer"></span>
+        <span class="status-item"><i class="codicon codicon-info" aria-hidden="true"></i><span id="partial-status"></span></span>
+      </footer>
+    </div>
+    <section class="comparison-editor" id="comparison-editor" role="dialog" aria-modal="true" aria-labelledby="comparison-title" hidden>
+      <form id="comparison-form">
+        <header><div><h2 id="comparison-title">Compare repository revisions</h2><p>Enter an explicit Git commit for every repository on both sides. Unsaved overlays are not included.</p></div><button class="icon-button" id="cancel-comparison" type="button" aria-label="Cancel comparison"><i class="codicon codicon-close" aria-hidden="true"></i></button></header>
+        <div class="comparison-grid comparison-grid-heading" aria-hidden="true"><span>Repository</span><span>Before commit</span><span>After commit</span></div>
+        <div id="comparison-rows"></div>
+        <p class="comparison-error" id="comparison-error" role="alert" hidden></p>
+        <footer><button id="submit-comparison" class="primary" type="submit"><i class="codicon codicon-git-compare" aria-hidden="true"></i>Compare relationships</button></footer>
+      </form>
+    </section>
+    <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+    {{PRELUDE}}
+    <script nonce="{{NONCE}}" src="{{SCRIPT_URI}}"></script>
+  </body>
+</html>

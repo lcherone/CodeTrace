@@ -1,0 +1,16 @@
+{
+  "name": "@trace/fixtures",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "dist/generate.js",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "check": "tsc -p tsconfig.json --noEmit",
+    "generate": "npm run build && node dist/cli.js",
+    "benchmark:scanner": "npm run build && node dist/scanner-benchmark-cli.js",
+    "benchmark:codelens": "npm run build && node dist/codelens-benchmark-cli.js",
+    "test": "npm run build && node --test dist/*.test.js",
+    "clean": "rm -rf dist generated"
+  }
+}
